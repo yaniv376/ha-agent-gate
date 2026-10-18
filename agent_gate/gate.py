@@ -335,10 +335,11 @@ def evaluate_tool_call(name, arguments):
     """Returns (decision, reason). decision in {'allow','deny','local'}."""
     if name in GATE_TOOL_NAMES:
         return "local", "gate tool"
+    if is_read_tool(name):
+        # Reading the gate's own entities is fine; only changing them is protected.
+        return "allow", "read tool"
     if touches_protected(arguments) or any(p in name.lower() for p in PROTECTED):
         return "deny", "touches the gate's own entities or topics; only the dashboard controls the gate"
-    if is_read_tool(name):
-        return "allow", "read tool"
     with STATE_LOCK:
         if STATE["mode"] == "open" and STATE["desired"].get("ha_write", False):
             return "allow", "window open"
