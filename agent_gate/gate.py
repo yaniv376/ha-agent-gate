@@ -386,19 +386,28 @@ def compute_deviation(actual):
 def apply_addons(open_):
     with STATE_LOCK:
         desired = dict(STATE["desired"])
+    jobs = []
     for m in addon_mechanisms():
         want = open_ and desired.get(m["key"], False)
         for slug in m["addons"]:
             st = addon_state(slug)
             if want and st != "started":
-                addon_action(slug, "start")
+                jobs.append((slug, "start"))
             elif not want and st == "started":
-                addon_action(slug, "stop")
+                jobs.append((slug, "stop"))
+    threads = [threading.Thread(target=addon_action, args=j, daemon=True) for j in jobs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=180)
 
 
 def open_window(minutes, source="dashboard"):
     """minutes == 0 means 'until I close'."""
     with STATE_LOCK:
+        if STATE["mode"] == "opening":
+            log("open requested while an open is already in progress; ignored")
+            return
         if STATE["mode"] == "open":
             # Already open: treat as extension to the requested length from now.
             STATE["window_end"] = iso(now_utc() + timedelta(minutes=minutes)) if minutes else None
@@ -722,10 +731,11 @@ def publish_all(actual=None, deviation=None):
     with STATE_LOCK:
         st = json.loads(json.dumps(STATE))
     open_ = st["mode"] == "open"
+    opening = st["mode"] == "opening"
     end = parse_iso(st.get("window_end"))
     remaining = max(0, int((end - now_utc()).total_seconds() // 60)) if (open_ and end) else (None if open_ else 0)
     pub = MQTT_CLIENT.publish
-    pub(f"{BASE}/master/state", "ON" if open_ else "OFF", qos=1, retain=True)
+    pub(f"{BASE}/master/state", "ON" if (open_ or opening) else "OFF", qos=1, retain=True)
     for m in MECHANISMS:
         a = actual.get(m["key"], {})
         # Switch shows the mechanism's part in the window; attributes carry the live truth.
@@ -1061,6 +1071,12 @@ class GateHandler(http.server.BaseHTTPRequestHandler):
 class ThreadingServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, TimeoutError)):
+            return  # health probes and dropped clients; not worth a traceback
+        super().handle_error(request, client_address)
 
 
 # --------------------------------------------------------------------------
