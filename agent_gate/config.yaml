@@ -1,6 +1,6 @@
 name: "Agent Gate"
 description: "On/off access gate for AI agents: MCP write lock, shell command tool, controlled add-ons, timed windows"
-version: "0.3.2"
+version: "0.3.3"
 slug: "agent_gate"
 url: "https://github.com/yaniv376/ha-agent-gate"
 arch:
@@ -74,20 +74,20 @@ options:
   mechanisms:
     - key: "ssh"
       name: "SSH"
-      addons: ["a0d7b954_ssh"]
       default_on: true
+      addons: ["a0d7b954_ssh"]
     - key: "claude_terminal"
       name: "Claude Terminal"
-      addons: ["e498daa1_claude_terminal"]
       default_on: true
+      addons: ["e498daa1_claude_terminal"]
     - key: "file_editors"
       name: "File editors"
-      addons: ["a0d7b954_vscode", "core_configurator"]
       default_on: true
+      addons: ["a0d7b954_vscode", "core_configurator"]
     - key: "appdaemon"
       name: "AppDaemon"
-      addons: ["a0d7b954_appdaemon"]
       default_on: false
+      addons: ["a0d7b954_appdaemon"]
 schema:
   upstream_mcp_url: str
   notify_service: str?
@@ -111,6 +111,6 @@ schema:
   mechanisms:
     - key: str
       name: str
+      default_on: bool?
       addons:
         - str?
-      default_on: bool?
