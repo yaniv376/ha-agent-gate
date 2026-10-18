@@ -57,7 +57,10 @@ backup, long-lived access tokens, and whether the gate's backstop
 automations exist. `sensor.agent_gate_scan` is `ok` / `warning` / `critical`
 and carries `findings` (severity, title, detail, fix) plus a ready-made
 `markdown` report; every scan is appended to `/data/scans.jsonl`. New
-critical findings are pushed to the phone.
+critical findings are pushed to the phone. The latest report is also written
+to `/share/agent_gate/scan_latest.md` and `.json`, and served on the LAN at
+the `report_url` attribute (a page with "Copy to clipboard" and download
+buttons; the link is printed in the add-on log).
 
 ## Destructive commands
 

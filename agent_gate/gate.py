@@ -56,7 +56,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -340,6 +340,47 @@ def endpoint_token():
 
 ENDPOINT_TOKEN = endpoint_token()
 ENDPOINT_PATH = f"/mcp/{ENDPOINT_TOKEN}"
+REPORT_TOKEN_PATH = os.path.join(DATA_DIR, "report_token")
+
+
+def _file_token(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            t = f.read().strip()
+            if len(t) >= 16:
+                return t
+    except Exception:
+        pass
+    t = secrets.token_urlsafe(18)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(t)
+    except Exception as e:
+        log(f"could not persist token {path}: {e}")
+    return t
+
+
+REPORT_TOKEN = _file_token(REPORT_TOKEN_PATH)
+REPORT_PATH = f"/report/{REPORT_TOKEN}"
+HA_HOST = None
+
+
+def ha_host():
+    """Best guess of the Home Assistant LAN address, for links in the dashboard."""
+    global HA_HOST
+    if HA_HOST:
+        return HA_HOST
+    try:
+        code, d = _sup_request("GET", "/network/info", timeout=15)
+        for itf in (d.get("data", {}).get("interfaces", []) if code == 200 else []):
+            if itf.get("primary") or itf.get("connected"):
+                for a in itf.get("ipv4", {}).get("address", []):
+                    HA_HOST = a.split("/")[0]
+                    return HA_HOST
+    except Exception:
+        pass
+    HA_HOST = "homeassistant.local"
+    return HA_HOST
 
 
 # --------------------------------------------------------------------------
@@ -1298,6 +1339,8 @@ def dashboard_config():
          "tap_action": {"action": "perform-action", "perform_action": "button.press",
                         "target": {"entity_id": "button.agent_gate_scan_now"}}},
         {"type": "markdown", "content": "{{ state_attr('sensor.agent_gate_scan','markdown') or 'No scan yet.' }}"},
+        {"type": "markdown", "content": "{% set u = state_attr('sensor.agent_gate_scan','report_url') %}"
+                                        "{% if u %}[Copy / download the report]({{ u }}) · files in /share/agent_gate{% endif %}"},
     ]
     return {"views": [{"title": "Agent Gate", "path": "gate", "icon": "mdi:shield-lock", "type": "sections",
                        "max_columns": 2, "sections": [
@@ -1530,6 +1573,7 @@ def run_scan(source="manual"):
         LAST_SCAN.clear()
         LAST_SCAN.update(report)
         _append_jsonl(SCANS_PATH, {k: v for k, v in report.items() if k != "markdown"})
+        write_report_files(report)
         if new_crit and source != "startup":
             notify(TS("notify_title"), TS("notify_new") + "\n" + "\n".join(f"- {f['title']}: {f['detail']}" for f in new_crit),
                    tag="agent_gate_scan")
@@ -1543,6 +1587,59 @@ def run_scan(source="manual"):
         publish_scan()
     finally:
         SCAN_LOCK.release()
+
+
+REPORT_DIR = "/share/agent_gate"
+
+
+def write_report_files(report):
+    """Latest report as .md and .json under /share (reachable from File editor,
+    Samba, VS Code) and served by the gate at REPORT_PATH."""
+    try:
+        os.makedirs(REPORT_DIR, exist_ok=True)
+        stamp = report["ts"].replace(":", "").replace("-", "")[:15]
+        with open(os.path.join(REPORT_DIR, "scan_latest.md"), "w", encoding="utf-8") as f:
+            f.write(report["markdown"].replace("\n\n", "\n") + "\n")
+        with open(os.path.join(REPORT_DIR, "scan_latest.json"), "w", encoding="utf-8") as f:
+            json.dump({k: v for k, v in report.items() if k != "markdown"}, f, ensure_ascii=False, indent=1)
+        with open(os.path.join(REPORT_DIR, f"scan_{stamp}.md"), "w", encoding="utf-8") as f:
+            f.write(report["markdown"].replace("\n\n", "\n") + "\n")
+    except Exception as e:
+        log(f"could not write report files: {e}")
+
+
+REPORT_HTML = """<!doctype html><html lang="{lang}" dir="{dir}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Agent Gate</title>
+<style>body{{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;padding:16px;max-width:760px}}
+button,a.b{{display:inline-block;font-size:18px;padding:14px 20px;margin:6px 4px 14px 0;border-radius:12px;border:0;
+background:#2d6cdf;color:#fff;text-decoration:none;cursor:pointer}}button.g{{background:#444}}
+pre{{white-space:pre-wrap;background:#1c1c1c;padding:14px;border-radius:12px;font-size:15px;line-height:1.5}}
+#ok{{color:#7bd88f;margin-inline-start:8px}}</style></head><body>
+<h2>{title}</h2>
+<button onclick="cp()">{copy}</button><span id="ok"></span><br>
+<a class="b g" href="{base}/scan.md" download="agent_gate_scan.md">{dl_md}</a>
+<a class="b g" href="{base}/scan.json" download="agent_gate_scan.json">{dl_json}</a>
+<pre id="t">{text}</pre>
+<script>function cp(){{var t=document.getElementById('t').innerText;
+function done(){{document.getElementById('ok').textContent='{copied}';}}
+if(navigator.clipboard&&window.isSecureContext){{navigator.clipboard.writeText(t).then(done);return;}}
+var ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity=0;document.body.appendChild(ta);
+ta.focus();ta.select();try{{document.execCommand('copy');done();}}catch(e){{}}document.body.removeChild(ta);}}</script>
+</body></html>"""
+
+
+def report_page():
+    md = LAST_SCAN.get("markdown") or ("אין סריקה עדיין." if LANG == "he" else "No scan yet.")
+    plain = re.sub(r"\*\*(.+?)\*\*", r"\1", md).replace("\n\n", "\n")
+    he = LANG == "he"
+    import html as _html
+    return REPORT_HTML.format(lang=LANG, dir="rtl" if he else "ltr",
+                              title="סריקת אבטחה" if he else "Security scan",
+                              copy="העתק ללוח" if he else "Copy to clipboard",
+                              copied="הועתק" if he else "Copied",
+                              dl_md="הורד .md" if he else "Download .md",
+                              dl_json="הורד .json" if he else "Download .json",
+                              base=REPORT_PATH, text=_html.escape(plain))
 
 
 def scan_markdown(findings, when):
@@ -1572,7 +1669,10 @@ def publish_scan():
     MQTT_CLIENT.publish(f"{BASE}/scan/state", state, qos=1, retain=True)
     MQTT_CLIENT.publish(f"{BASE}/scan/attributes", json.dumps({
         "ts": LAST_SCAN.get("ts"), "counts": counts, "findings": LAST_SCAN.get("findings", []),
-        "markdown": LAST_SCAN.get("markdown", "")}, ensure_ascii=False), qos=1, retain=True)
+        "markdown": LAST_SCAN.get("markdown", ""),
+        "report_url": f"http://{ha_host()}:{int(OPT.get('listen_port') or 9584)}{REPORT_PATH}/",
+        "files": [f"{REPORT_DIR}/scan_latest.md", f"{REPORT_DIR}/scan_latest.json"]},
+        ensure_ascii=False), qos=1, retain=True)
 
 
 def scan_loop():
@@ -1715,9 +1815,34 @@ class GateHandler(http.server.BaseHTTPRequestHandler):
     def _endpoint_ok(self):
         return self.path.split("?", 1)[0] == ENDPOINT_PATH
 
+    def _send_bytes(self, code, body, ctype, download=None):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        if download:
+            self.send_header("Content-Disposition", f'attachment; filename="{download}"')
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         if self.path == "/healthz":
             self._send_json(200, {"status": "alive", "mode": STATE["mode"]})
+            return
+        path = self.path.split("?", 1)[0]
+        if path.startswith(REPORT_PATH):
+            sub = path[len(REPORT_PATH):].strip("/")
+            if sub == "":
+                self._send_bytes(200, report_page().encode("utf-8"), "text/html; charset=utf-8")
+            elif sub == "scan.md":
+                self._send_bytes(200, (LAST_SCAN.get("markdown") or "").replace("\n\n", "\n").encode("utf-8"),
+                                 "text/markdown; charset=utf-8", "agent_gate_scan.md")
+            elif sub == "scan.json":
+                body = json.dumps({k: v for k, v in LAST_SCAN.items() if k != "markdown"},
+                                  ensure_ascii=False, indent=1).encode("utf-8")
+                self._send_bytes(200, body, "application/json; charset=utf-8", "agent_gate_scan.json")
+            else:
+                self._send_json(404, {"error": "not_found"})
             return
         if not self._endpoint_ok():
             self._send_json(404, {"error": "not_found"})
@@ -1959,6 +2084,7 @@ def main():
         threading.Thread(target=scan_loop, daemon=True).start()
     log("=" * 60)
     log(f"MCP gate endpoint: http://<home-assistant-ip>:{port}{ENDPOINT_PATH}")
+    log(f"Scan report page: http://<home-assistant-ip>:{port}{REPORT_PATH}/ (also /share/agent_gate/)")
     log("Set this as 'MCP server URL' in the Webhook Proxy add-on.")
     log("=" * 60)
     srv = ThreadingServer(("0.0.0.0", port), GateHandler)
