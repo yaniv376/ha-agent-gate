@@ -56,7 +56,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.3.4"
+VERSION = "0.3.5"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -1488,10 +1488,20 @@ def _ws_tokens():
         return None
 
 
+SCAN_COOLDOWN = 60  # seconds between scan starts
+_LAST_SCAN_START = 0.0
+
+
 def run_scan(source="manual"):
+    global _LAST_SCAN_START
     if not SCAN_LOCK.acquire(blocking=False):
         log("scan already running")
         return
+    if source == "manual" and time.time() - _LAST_SCAN_START < SCAN_COOLDOWN:
+        log("scan ignored: last scan started less than a minute ago")
+        SCAN_LOCK.release()
+        return
+    _LAST_SCAN_START = time.time()
     try:
         if MQTT_CLIENT:
             MQTT_CLIENT.publish(f"{BASE}/scan/state", "scanning", qos=1, retain=True)
