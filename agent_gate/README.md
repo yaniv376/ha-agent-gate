@@ -81,6 +81,10 @@ under `mechanisms`.
 - `upstream_mcp_url` (required): ha-mcp private URL.
 - `notify_service`: `notify.<this>` for phone notifications (default `notify`).
 - `reminder_minutes`: 0 disables reminders.
+- The backup policy and the reminder interval are also entities
+  (`select.agent_gate_backup_mode`, `number.agent_gate_backup_min_interval_hours`,
+  `number.agent_gate_backup_skip_minutes`, `number.agent_gate_reminder_minutes`),
+  so they can live on the dashboard; a value set there overrides the option.
 - Backup policy: `backup_mode` is `always` (a full backup before every open),
   `if_stale` (only when the newest full backup the Supervisor knows about,
   from any source, is older than `backup_min_interval_hours`), or `never`.

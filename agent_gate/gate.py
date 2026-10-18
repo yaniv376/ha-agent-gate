@@ -188,6 +188,54 @@ def load_state():
 
 STATE = load_state()
 
+SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
+SETTINGS_KEYS = {
+    "backup_mode": ("always", "if_stale", "never"),
+    "backup_min_interval_hours": (1, 168),
+    "backup_skip_windows_up_to_minutes": (0, 1440),
+    "reminder_minutes": (0, 1440),
+}
+
+
+def load_settings():
+    try:
+        with open(SETTINGS_PATH, encoding="utf-8") as f:
+            return {k: v for k, v in json.load(f).items() if k in SETTINGS_KEYS}
+    except Exception:
+        return {}
+
+
+SETTINGS = load_settings()
+
+
+def setting(key):
+    """Dashboard-set value wins over options.json; options.json wins over the default."""
+    if key in SETTINGS:
+        return SETTINGS[key]
+    return OPT.get(key)
+
+
+def set_setting(key, value):
+    spec = SETTINGS_KEYS.get(key)
+    if spec is None:
+        return False
+    if isinstance(spec[0], str):
+        if value not in spec:
+            return False
+    else:
+        try:
+            value = int(float(value))
+        except Exception:
+            return False
+        value = max(spec[0], min(spec[1], value))
+    SETTINGS[key] = value
+    try:
+        _atomic_write_json(SETTINGS_PATH, SETTINGS)
+    except Exception as e:
+        log(f"could not persist settings: {e}")
+    log(f"setting {key} = {value}")
+    return True
+
 
 def save_state():
     with STATE_LOCK:
@@ -304,14 +352,14 @@ def latest_full_backup_age_hours():
 
 def backup_needed(minutes):
     """Apply the user's backup policy. Returns (needed, reason)."""
-    mode = str(OPT.get("backup_mode") or ("always" if OPT.get("backup_on_open", True) else "never"))
-    skip_short = int(OPT.get("backup_skip_windows_up_to_minutes") or 0)
+    mode = str(setting("backup_mode") or ("always" if OPT.get("backup_on_open", True) else "never"))
+    skip_short = int(setting("backup_skip_windows_up_to_minutes") or 0)
     if mode == "never":
         return False, "backup_mode=never"
     if skip_short and minutes and minutes <= skip_short:
         return False, f"window of {minutes} min is within backup_skip_windows_up_to_minutes={skip_short}"
     if mode == "if_stale":
-        max_age = float(OPT.get("backup_min_interval_hours") or 6)
+        max_age = float(setting("backup_min_interval_hours") or 6)
         age = latest_full_backup_age_hours()
         if age is not None and age < max_age:
             return False, f"last full backup is {age:.1f} h old (< {max_age:g} h)"
@@ -601,7 +649,7 @@ def timer_loop():
             if mode == "open" and end and now >= end:
                 lock_window("timer expired")
             elif mode == "open":
-                rem_min = int(OPT.get("reminder_minutes") or 0)
+                rem_min = int(setting("reminder_minutes") or 0)
                 if rem_min and last_rem and now - last_rem >= timedelta(minutes=rem_min):
                     with STATE_LOCK:
                         STATE["last_reminder"] = iso(now)
@@ -763,6 +811,29 @@ def publish_discovery():
     _disc("binary_sensor", "deviation", {"name": "Gate deviation", "device_class": "problem",
                                          "state_topic": f"{BASE}/deviation/state",
                                          "json_attributes_topic": f"{BASE}/deviation/attributes"})
+    _disc("select", "backup_mode", {"name": "Backup before opening", "icon": "mdi:backup-restore",
+                                    "options": ["always", "if_stale", "never"],
+                                    "state_topic": f"{BASE}/setting/backup_mode/state",
+                                    "command_topic": f"{BASE}/cmd/setting/backup_mode",
+                                    "entity_category": "config"})
+    _disc("number", "backup_min_interval_hours", {"name": "Backup max age (hours)", "icon": "mdi:clock-outline",
+                                                  "min": 1, "max": 168, "step": 1, "mode": "box",
+                                                  "unit_of_measurement": "h",
+                                                  "state_topic": f"{BASE}/setting/backup_min_interval_hours/state",
+                                                  "command_topic": f"{BASE}/cmd/setting/backup_min_interval_hours",
+                                                  "entity_category": "config"})
+    _disc("number", "backup_skip_minutes", {"name": "Skip backup for windows up to (min)", "icon": "mdi:timer-off-outline",
+                                            "min": 0, "max": 180, "step": 5, "mode": "slider",
+                                            "unit_of_measurement": "min",
+                                            "state_topic": f"{BASE}/setting/backup_skip_windows_up_to_minutes/state",
+                                            "command_topic": f"{BASE}/cmd/setting/backup_skip_windows_up_to_minutes",
+                                            "entity_category": "config"})
+    _disc("number", "reminder_minutes", {"name": "Reminder every (min)", "icon": "mdi:bell-ring-outline",
+                                         "min": 0, "max": 240, "step": 15, "mode": "slider",
+                                         "unit_of_measurement": "min",
+                                         "state_topic": f"{BASE}/setting/reminder_minutes/state",
+                                         "command_topic": f"{BASE}/cmd/setting/reminder_minutes",
+                                         "entity_category": "config"})
     _disc("sensor", "pending", {"name": "Pending approvals", "icon": "mdi:account-question",
                                 "state_topic": f"{BASE}/pending/state",
                                 "json_attributes_topic": f"{BASE}/pending/attributes"})
@@ -809,6 +880,12 @@ def publish_all(actual=None, deviation=None):
     pub(f"{BASE}/deviation/state", "ON" if deviation else "OFF", qos=1, retain=True)
     pub(f"{BASE}/deviation/attributes", json.dumps({"mechanisms": deviation,
                                                      "since": st.get("deviation_since")}), qos=1, retain=True)
+    for key in SETTINGS_KEYS:
+        val = setting(key)
+        if val is None:
+            val = {"backup_mode": "always", "backup_min_interval_hours": 6,
+                   "backup_skip_windows_up_to_minutes": 0, "reminder_minutes": 60}[key]
+        pub(f"{BASE}/setting/{key}/state", str(val), qos=1, retain=True)
     pend = {k: v for k, v in st.get("pending", {}).items() if v.get("status") == "pending"}
     pub(f"{BASE}/pending/state", str(len(pend)), qos=1, retain=True)
     pub(f"{BASE}/pending/attributes", json.dumps({
@@ -837,6 +914,10 @@ def on_mqtt_message(client, userdata, msg):
                 if open_:
                     threading.Thread(target=apply_addons, args=(True,), daemon=True).start()
                 publish_all()
+        elif topic.startswith(f"{BASE}/cmd/setting/"):
+            key = topic.rsplit("/", 1)[1]
+            set_setting(key, payload)
+            publish_all()
         elif topic == f"{BASE}/cmd/button":
             handle_button(payload)
         elif topic == f"{BASE}/action":
