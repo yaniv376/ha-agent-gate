@@ -540,6 +540,8 @@ def open_window(minutes, source="dashboard"):
     with STATE_LOCK:
         STATE["mode"] = "open"
         STATE["backup"] = backup
+        if backup:
+            STATE["last_backup_at"] = iso(now_utc())
         save_state()
     apply_addons(True)
     _append_jsonl(HISTORY_PATH, {"event": "open", "window_id": wid, "ts": iso(now_utc()),
@@ -871,6 +873,7 @@ def publish_all(actual=None, deviation=None):
     pub(f"{BASE}/status/state", status, qos=1, retain=True)
     pub(f"{BASE}/status/attributes", json.dumps({
         "window_id": st.get("window_id"), "opened_at": st.get("opened_at"),
+        "last_backup_at": st.get("last_backup_at"),
         "window_end": st.get("window_end") or ("until closed" if open_ else None),
         "backup": st.get("backup"), "deviation": deviation,
         "actual": {k: v.get("running") for k, v in actual.items()},
