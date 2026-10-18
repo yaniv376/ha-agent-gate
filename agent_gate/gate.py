@@ -62,7 +62,8 @@ HISTORY_PATH = os.path.join(DATA_DIR, "windows.jsonl")
 
 SUPERVISOR = os.environ.get("SUPERVISOR_URL", "http://supervisor")
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
-SELF_SLUG = os.environ.get("GATE_SELF_SLUG", "local_agent_gate")
+# Supervisor sets HOSTNAME to "<repo>-agent-gate"; the add-on slug is the same with underscores.
+SELF_SLUG = os.environ.get("GATE_SELF_SLUG") or os.environ.get("HOSTNAME", "local-agent-gate").replace("-", "_")
 
 MOUNTS = [p for p in ("/addons", "/homeassistant", "/share") if os.path.isdir(p)]
 CHANGED_FILES_EXCLUDE = re.compile(

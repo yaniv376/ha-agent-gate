@@ -58,7 +58,7 @@ automation:
         data: { addon: a0d7b954_appdaemon }
         continue_on_error: true
       - action: hassio.addon_start
-        data: { addon: local_agent_gate }
+        data: { addon: c0be4732_agent_gate }
         continue_on_error: true
 
   - id: agent_gate_guard_deviation
