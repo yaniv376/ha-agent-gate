@@ -56,7 +56,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -1035,6 +1035,10 @@ def publish_discovery():
     _disc("sensor", "scan", {"name": "Security scan", "icon": "mdi:shield-search",
                              "state_topic": f"{BASE}/scan/state",
                              "json_attributes_topic": f"{BASE}/scan/attributes"})
+    for _n in range(1, SCAN_SLOTS + 1):
+        _disc("sensor", f"scan_h{_n}", {"name": f"Security scan history {_n}", "icon": "mdi:shield-search",
+                                        "state_topic": f"{BASE}/scan/h{_n}/state",
+                                        "json_attributes_topic": f"{BASE}/scan/h{_n}/attributes"})
     _disc("sensor", "pending", {"name": "Pending approvals", "icon": "mdi:account-question",
                                 "state_topic": f"{BASE}/pending/state",
                                 "json_attributes_topic": f"{BASE}/pending/attributes"})
@@ -1378,6 +1382,32 @@ def ensure_dashboard():
 SCANS_PATH = os.path.join(DATA_DIR, "scans.jsonl")
 SCAN_LOCK = threading.Lock()
 LAST_SCAN = {}
+SCAN_SLOTS = 5
+SCAN_HISTORY_PATH = os.path.join(DATA_DIR, "scan_history.json")
+try:
+    with open(SCAN_HISTORY_PATH, encoding="utf-8") as _f:
+        SCAN_HISTORY = json.load(_f)[:SCAN_SLOTS]
+except Exception:
+    SCAN_HISTORY = []
+
+
+def remember_scan(report):
+    """Keep the last SCAN_SLOTS reports (with their text) for the dashboard history."""
+    SCAN_HISTORY.insert(0, {"ts": report.get("ts"), "counts": report.get("counts", {}),
+                            "markdown": report.get("markdown", "")})
+    del SCAN_HISTORY[SCAN_SLOTS:]
+    try:
+        with open(SCAN_HISTORY_PATH, "w", encoding="utf-8") as f:
+            json.dump(SCAN_HISTORY, f, ensure_ascii=False)
+    except Exception as e:
+        log(f"could not save scan history: {e}")
+
+
+def _scan_label(ts):
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).astimezone().strftime("%d/%m %H:%M")
+    except Exception:
+        return str(ts or "")
 SEV_ORDER = {"critical": 0, "warning": 1, "info": 2, "ok": 3}
 SCAN_STRINGS = {
     "en": {
@@ -1573,6 +1603,7 @@ def run_scan(source="manual"):
         LAST_SCAN.clear()
         LAST_SCAN.update(report)
         _append_jsonl(SCANS_PATH, {k: v for k, v in report.items() if k != "markdown"})
+        remember_scan(report)
         write_report_files(report)
         if new_crit and source != "startup":
             notify(TS("notify_title"), TS("notify_new") + "\n" + "\n".join(f"- {f['title']}: {f['detail']}" for f in new_crit),
@@ -1673,11 +1704,33 @@ def publish_scan():
         "report_url": f"http://{ha_host()}:{int(OPT.get('listen_port') or 9584)}{REPORT_PATH}/",
         "files": [f"{REPORT_DIR}/scan_latest.md", f"{REPORT_DIR}/scan_latest.json"]},
         ensure_ascii=False), qos=1, retain=True)
+    publish_scan_history()
+
+
+def publish_scan_history():
+    """Slots 1..N (newest first): state is the scan time, attributes hold counts and text."""
+    if not MQTT_CLIENT:
+        return
+    for n in range(1, SCAN_SLOTS + 1):
+        if n <= len(SCAN_HISTORY):
+            h = SCAN_HISTORY[n - 1]
+            c = h.get("counts") or {}
+            sev = "critical" if c.get("critical") else ("warning" if c.get("warning") else "ok")
+            MQTT_CLIENT.publish(f"{BASE}/scan/h{n}/state", _scan_label(h.get("ts")), qos=1, retain=True)
+            MQTT_CLIENT.publish(f"{BASE}/scan/h{n}/attributes", json.dumps({
+                "ts": h.get("ts"), "counts": c, "severity": sev,
+                "summary": TS("summary", c=c.get("critical", 0), w=c.get("warning", 0), i=c.get("info", 0)),
+                "markdown": h.get("markdown", "")}, ensure_ascii=False), qos=1, retain=True)
+        else:
+            MQTT_CLIENT.publish(f"{BASE}/scan/h{n}/state", "none", qos=1, retain=True)
+            MQTT_CLIENT.publish(f"{BASE}/scan/h{n}/attributes", json.dumps({"severity": "none", "summary": "", "markdown": ""}),
+                                qos=1, retain=True)
 
 
 def scan_loop():
     hours = int(OPT.get("scan_interval_hours") or 0)
     time.sleep(90)
+    publish_scan_history()
     run_scan("startup")
     while hours:
         time.sleep(hours * 3600)
