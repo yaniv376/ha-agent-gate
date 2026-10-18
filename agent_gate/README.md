@@ -20,7 +20,8 @@ open it for itself.
 
 ## What happens on open
 
-1. Full Supervisor backup (`backup_on_open`), the window is not opened if it fails.
+1. Full Supervisor backup according to the backup policy (below); if a backup is
+   required and fails, the window is not opened.
 2. Add-ons of every mechanism whose switch is ON are started.
 3. The MCP write path and `gate_run_command` are enabled.
 4. A phone notification with "Lock now" and "+1 hour" buttons; repeated every
@@ -80,7 +81,12 @@ under `mechanisms`.
 - `upstream_mcp_url` (required): ha-mcp private URL.
 - `notify_service`: `notify.<this>` for phone notifications (default `notify`).
 - `reminder_minutes`: 0 disables reminders.
-- `deviation_grace_minutes`, `approval_timeout_minutes`, `backup_on_open`,
+- Backup policy: `backup_mode` is `always` (a full backup before every open),
+  `if_stale` (only when the newest full backup the Supervisor knows about,
+  from any source, is older than `backup_min_interval_hours`), or `never`.
+  `backup_skip_windows_up_to_minutes` skips the backup for short windows
+  (e.g. 15 means 5 and 15 minute windows open immediately; 0 disables).
+- `deviation_grace_minutes`, `approval_timeout_minutes`,
   `default_window_minutes` (used by the master switch; the buttons choose
   explicit durations, "Open until I close" has no end).
 - `read_tool_patterns`: tool names (glob) that pass while locked. Everything

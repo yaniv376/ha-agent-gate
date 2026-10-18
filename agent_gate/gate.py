@@ -101,6 +101,9 @@ def load_options():
         "deviation_grace_minutes": 5,
         "approval_timeout_minutes": 3,
         "backup_on_open": True,
+        "backup_mode": "always",
+        "backup_min_interval_hours": 6,
+        "backup_skip_windows_up_to_minutes": 0,
         "default_window_minutes": 30,
         "read_tool_patterns": ["ha_get_*", "ha_list_*", "ha_search", "ha_config_get_*",
                                "ha_config_list_*", "ha_read_file", "ha_eval_template",
@@ -272,6 +275,50 @@ def create_full_backup(name):
     return None
 
 
+def latest_full_backup_age_hours():
+    """Hours since the newest full backup the Supervisor knows about (any source), or None."""
+    try:
+        code, data = _sup_request("GET", "/backups", timeout=30)
+        if code != 200:
+            return None
+        newest = None
+        for b in data.get("data", {}).get("backups", []):
+            if b.get("type") != "full":
+                continue
+            d = b.get("date")
+            if not d:
+                continue
+            try:
+                dt = datetime.fromisoformat(d.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if newest is None or dt > newest:
+                newest = dt
+        if newest is None:
+            return None
+        return (now_utc() - newest).total_seconds() / 3600.0
+    except Exception as e:
+        log(f"backup list failed: {e}")
+        return None
+
+
+def backup_needed(minutes):
+    """Apply the user's backup policy. Returns (needed, reason)."""
+    mode = str(OPT.get("backup_mode") or ("always" if OPT.get("backup_on_open", True) else "never"))
+    skip_short = int(OPT.get("backup_skip_windows_up_to_minutes") or 0)
+    if mode == "never":
+        return False, "backup_mode=never"
+    if skip_short and minutes and minutes <= skip_short:
+        return False, f"window of {minutes} min is within backup_skip_windows_up_to_minutes={skip_short}"
+    if mode == "if_stale":
+        max_age = float(OPT.get("backup_min_interval_hours") or 6)
+        age = latest_full_backup_age_hours()
+        if age is not None and age < max_age:
+            return False, f"last full backup is {age:.1f} h old (< {max_age:g} h)"
+        return True, "no recent full backup" if age is None else f"last full backup is {age:.1f} h old"
+    return True, "backup_mode=always"
+
+
 def ha_call_service(domain, service, payload):
     try:
         code, data = _sup_request("POST", f"/core/api/services/{domain}/{service}", body=payload, timeout=30)
@@ -431,8 +478,9 @@ def open_window(minutes, source="dashboard"):
         save_state()
     publish_all()
     backup = None
-    if OPT.get("backup_on_open", True):
-        log("creating full backup before opening ...")
+    need, why = backup_needed(minutes)
+    log(f"backup before opening: {'yes' if need else 'skipped'} ({why})")
+    if need:
         backup = create_full_backup(f"agent_gate_{datetime.now().strftime('%Y%m%d_%H%M')}")
         if not backup:
             notify("Agent Gate", "Backup failed. The window was NOT opened.", tag="agent_gate_window")
