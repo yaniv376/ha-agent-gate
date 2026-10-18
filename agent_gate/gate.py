@@ -311,6 +311,11 @@ for p in OPT.get("destructive_patterns", []) or []:
         log(f"bad destructive pattern {p!r}: {e}")
 
 GATE_TOOL_NAMES = ("gate_status", "gate_run_command")
+# Write tools that may mention the gate's entities without being able to act on them:
+# a dashboard card is tapped by the user, a label or category is cosmetic.
+PROTECTED_EXEMPT = set(OPT.get("protected_exempt_tools") or [
+    "ha_config_set_dashboard", "ha_config_set_dashboard_resource",
+    "ha_config_set_label", "ha_config_set_category"])
 
 
 def is_read_tool(name):
@@ -338,7 +343,7 @@ def evaluate_tool_call(name, arguments):
     if is_read_tool(name):
         # Reading the gate's own entities is fine; only changing them is protected.
         return "allow", "read tool"
-    if touches_protected(arguments) or any(p in name.lower() for p in PROTECTED):
+    if name not in PROTECTED_EXEMPT and (touches_protected(arguments) or any(p in name.lower() for p in PROTECTED)):
         return "deny", "touches the gate's own entities or topics; only the dashboard controls the gate"
     with STATE_LOCK:
         if STATE["mode"] == "open" and STATE["desired"].get("ha_write", False):

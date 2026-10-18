@@ -1,6 +1,6 @@
 name: "Agent Gate"
 description: "On/off access gate for AI agents: MCP write lock, shell command tool, controlled add-ons, timed windows"
-version: "0.1.3"
+version: "0.1.4"
 slug: "agent_gate"
 url: "https://github.com/yaniv376/ha-agent-gate"
 arch:
@@ -44,6 +44,11 @@ options:
     - "ha_report_issue"
   protected_patterns:
     - "agent_gate"
+  protected_exempt_tools:
+    - "ha_config_set_dashboard"
+    - "ha_config_set_dashboard_resource"
+    - "ha_config_set_label"
+    - "ha_config_set_category"
   destructive_patterns:
     - "\\brm\\b"
     - "\\brmdir\\b"
@@ -90,6 +95,8 @@ schema:
   read_tool_patterns:
     - str
   protected_patterns:
+    - str?
+  protected_exempt_tools:
     - str?
   destructive_patterns:
     - str?
