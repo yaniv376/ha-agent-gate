@@ -342,7 +342,7 @@ def evaluate_tool_call(name, arguments):
     with STATE_LOCK:
         if STATE["mode"] == "open" and STATE["desired"].get("ha_write", False):
             return "allow", "window open"
-    return "deny", ("Agent Gate is LOCKED. Write tools are refused until Yaniv opens a "
+    return "deny", ("Agent Gate is LOCKED. Write tools are refused until the user opens a "
                     "window from the dashboard. Ask the user to open the gate, then retry.")
 
 
