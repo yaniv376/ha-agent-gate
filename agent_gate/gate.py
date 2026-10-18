@@ -56,7 +56,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.3.3"
+VERSION = "0.3.4"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -1493,6 +1493,10 @@ def run_scan(source="manual"):
         log("scan already running")
         return
     try:
+        if MQTT_CLIENT:
+            MQTT_CLIENT.publish(f"{BASE}/scan/state", "scanning", qos=1, retain=True)
+            if source != "startup":
+                time.sleep(2)  # keep the "scanning" state visible on the dashboard
         findings = []
         now = now_utc()
         # 1. gate state
