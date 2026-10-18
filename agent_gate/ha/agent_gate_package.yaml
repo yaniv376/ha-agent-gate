@@ -1,0 +1,92 @@
+# Agent Gate - Home Assistant side.
+# Copy to /homeassistant/packages/agent_gate.yaml (packages must be enabled:
+#   homeassistant:
+#     packages: !include_dir_named packages
+# ) and restart Home Assistant, or create the two automations through the UI.
+#
+# 1. Relay phone notification buttons to the gate over MQTT.
+# 2. Independent guard: if the gate add-on goes offline, stop every editing
+#    add-on it is supposed to control and start the gate again. This does
+#    not depend on the gate's own code.
+#
+# Edit the add-on slugs in the guard to match your "mechanisms" option.
+
+automation:
+  - id: agent_gate_phone_action_relay
+    alias: "Agent Gate: relay phone actions"
+    description: "Forwards AGENT_GATE_* notification buttons to the gate add-on"
+    mode: queued
+    triggers:
+      - trigger: event
+        event_type: mobile_app_notification_action
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.event.data.action is string and trigger.event.data.action.startswith('AGENT_GATE_') }}"
+    actions:
+      - action: mqtt.publish
+        data:
+          topic: agent_gate/action
+          payload: "{{ trigger.event.data.action }}"
+
+  - id: agent_gate_guard_offline
+    alias: "Agent Gate: guard when gate is offline"
+    description: "Gate add-on offline for 3 minutes: stop editing add-ons, restart the gate, notify"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: sensor.agent_gate_status
+        to: "unavailable"
+        for: "00:03:00"
+    actions:
+      - action: notify.notify
+        data:
+          title: "Agent Gate offline"
+          message: "The gate add-on is down. Stopping SSH, Claude Terminal, VS Code and File editor, then restarting the gate."
+      - action: hassio.addon_stop
+        data: { addon: a0d7b954_ssh }
+        continue_on_error: true
+      - action: hassio.addon_stop
+        data: { addon: e498daa1_claude_terminal }
+        continue_on_error: true
+      - action: hassio.addon_stop
+        data: { addon: a0d7b954_vscode }
+        continue_on_error: true
+      - action: hassio.addon_stop
+        data: { addon: core_configurator }
+        continue_on_error: true
+      - action: hassio.addon_stop
+        data: { addon: a0d7b954_appdaemon }
+        continue_on_error: true
+      - action: hassio.addon_start
+        data: { addon: local_agent_gate }
+        continue_on_error: true
+
+  - id: agent_gate_guard_deviation
+    alias: "Agent Gate: guard on long deviation"
+    description: "Deviation reported for 10 minutes (gate did not enforce): stop editing add-ons"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.agent_gate_deviation
+        to: "on"
+        for: "00:10:00"
+    actions:
+      - action: notify.notify
+        data:
+          title: "Agent Gate: forced lock"
+          message: "Deviation lasted 10 minutes. Stopping editing add-ons."
+      - action: hassio.addon_stop
+        data: { addon: a0d7b954_ssh }
+        continue_on_error: true
+      - action: hassio.addon_stop
+        data: { addon: e498daa1_claude_terminal }
+        continue_on_error: true
+      - action: hassio.addon_stop
+        data: { addon: a0d7b954_vscode }
+        continue_on_error: true
+      - action: hassio.addon_stop
+        data: { addon: core_configurator }
+        continue_on_error: true
+      - action: hassio.addon_stop
+        data: { addon: a0d7b954_appdaemon }
+        continue_on_error: true

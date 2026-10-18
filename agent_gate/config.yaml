@@ -1,0 +1,101 @@
+name: "Agent Gate"
+description: "On/off access gate for AI agents: MCP write lock, shell command tool, controlled add-ons, timed windows"
+version: "0.1.0"
+slug: "agent_gate"
+url: "https://github.com/yaniv376/ha-agent-gate"
+arch:
+  - aarch64
+  - amd64
+startup: application
+boot: auto
+init: false
+watchdog: "http://[HOST]:[PORT:9584]/healthz"
+homeassistant_api: true
+hassio_api: true
+hassio_role: manager
+map:
+  - addons:rw
+  - homeassistant_config:rw
+  - share:rw
+  - backup:ro
+ports:
+  9584/tcp: 9584
+ports_description:
+  9584/tcp: "MCP gate endpoint. Point the Webhook Proxy's 'MCP server URL' at it (see add-on log for the private path)."
+services:
+  - mqtt:need
+options:
+  upstream_mcp_url: ""
+  notify_service: "notify"
+  reminder_minutes: 60
+  deviation_grace_minutes: 5
+  approval_timeout_minutes: 3
+  backup_on_open: true
+  default_window_minutes: 30
+  read_tool_patterns:
+    - "ha_get_*"
+    - "ha_list_*"
+    - "ha_search"
+    - "ha_config_get_*"
+    - "ha_config_list_*"
+    - "ha_read_file"
+    - "ha_eval_template"
+    - "ha_get_skill_guide"
+    - "ha_report_issue"
+  protected_patterns:
+    - "agent_gate"
+  destructive_patterns:
+    - "\\brm\\b"
+    - "\\brmdir\\b"
+    - "\\bunlink\\b"
+    - "\\bmv\\b"
+    - "\\bshred\\b"
+    - "\\bdd\\b"
+    - "\\bmkfs"
+    - "\\bchmod\\b"
+    - "\\bchown\\b"
+    - "\\btruncate\\b"
+    - ">\\s*/"
+    - "\\bdocker\\b"
+    - "\\bha\\s+(core|host|supervisor|os)\\b"
+    - "\\breboot\\b"
+    - "\\bshutdown\\b"
+    - "\\bkill"
+    - "\\bgit\\s+(reset|clean|checkout\\s+--|push\\s+-f)"
+  mechanisms:
+    - key: "ssh"
+      name: "SSH"
+      addons: ["a0d7b954_ssh"]
+      default_on: true
+    - key: "claude_terminal"
+      name: "Claude Terminal"
+      addons: ["e498daa1_claude_terminal"]
+      default_on: true
+    - key: "file_editors"
+      name: "File editors"
+      addons: ["a0d7b954_vscode", "core_configurator"]
+      default_on: true
+    - key: "appdaemon"
+      name: "AppDaemon"
+      addons: ["a0d7b954_appdaemon"]
+      default_on: false
+schema:
+  upstream_mcp_url: str
+  notify_service: str?
+  reminder_minutes: int(0,1440)?
+  deviation_grace_minutes: int(1,60)?
+  approval_timeout_minutes: int(1,30)?
+  backup_on_open: bool?
+  default_window_minutes: int(1,1440)?
+  read_tool_patterns:
+    - str
+  protected_patterns:
+    - str?
+  destructive_patterns:
+    - str?
+  mechanisms:
+    - key: str
+      name: str
+      addons:
+        - str?
+      default_on: bool?
