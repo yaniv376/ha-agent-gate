@@ -46,6 +46,19 @@ summary: commands that ran and files changed under `/addons`,
 `/homeassistant`, `/share` since the first open. History goes to
 `/data/windows.jsonl`.
 
+## Security scan
+
+`button.agent_gate_scan_now` (also 90 s after every start and every
+`scan_interval_hours`) checks: open mechanisms and deviations, add-ons with
+protection mode off or host networking, add-ons exposing ports on the host,
+an SSH add-on that accepts a password, remote-access tunnels, pending
+updates for Core / OS / Supervisor / add-ons, the age of the newest full
+backup, long-lived access tokens, and whether the gate's backstop
+automations exist. `sensor.agent_gate_scan` is `ok` / `warning` / `critical`
+and carries `findings` (severity, title, detail, fix) plus a ready-made
+`markdown` report; every scan is appended to `/data/scans.jsonl`. New
+critical findings are pushed to the phone.
+
 ## Destructive commands
 
 `gate_run_command` holds any command matching `destructive_patterns` and sends

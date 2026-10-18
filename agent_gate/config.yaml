@@ -1,6 +1,6 @@
 name: "Agent Gate"
 description: "On/off access gate for AI agents: MCP write lock, shell command tool, controlled add-ons, timed windows"
-version: "0.2.0"
+version: "0.3.0"
 slug: "agent_gate"
 url: "https://github.com/yaniv376/ha-agent-gate"
 arch:
@@ -35,6 +35,7 @@ options:
   language: "en"
   default_window_minutes: 30
   create_dashboard: true
+  scan_interval_hours: 24
   read_tool_patterns:
     - "ha_get_*"
     - "ha_list_*"
@@ -98,6 +99,7 @@ schema:
   language: list(en|he)?
   default_window_minutes: int(1,1440)?
   create_dashboard: bool?
+  scan_interval_hours: int(0,168)?
   read_tool_patterns:
     - str
   protected_patterns:

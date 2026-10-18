@@ -29,6 +29,9 @@ configuration:
   create_dashboard:
     name: Create the Agent Gate dashboard
     description: On start, create a ready-made "Agent Gate" dashboard in the sidebar if one does not exist yet.
+  scan_interval_hours:
+    name: Security scan every (hours)
+    description: Run the security scan on a schedule. 0 = only from the Scan now button. A scan also runs 90 s after every start.
   read_tool_patterns:
     name: Read-only tool patterns
     description: MCP tools matching these patterns are always allowed (they only read).

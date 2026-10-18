@@ -56,7 +56,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -110,6 +110,7 @@ def load_options():
         "language": "en",
         "default_window_minutes": 30,
         "create_dashboard": True,
+        "scan_interval_hours": 24,
         "read_tool_patterns": ["ha_get_*", "ha_list_*", "ha_search", "ha_config_get_*",
                                "ha_config_list_*", "ha_read_file", "ha_eval_template",
                                "ha_get_skill_guide", "ha_report_issue"],
@@ -892,7 +893,7 @@ DURATION_BUTTONS = [("open_5", "Open 5 min", 5), ("open_15", "Open 15 min", 15),
                     ("open_30", "Open 30 min", 30), ("open_60", "Open 1 hour", 60),
                     ("open_180", "Open 3 hours", 180), ("open_unlimited", "Open until I close", 0),
                     ("extend_60", "Add 1 hour", -60), ("lock_now", "Lock now", -1),
-                    ("backup_now", "Backup now", -2)]
+                    ("backup_now", "Backup now", -2), ("scan_now", "Scan now", -3)]
 
 
 def mqtt_connect():
@@ -960,7 +961,8 @@ def publish_discovery():
                                                  "state_topic": f"{BASE}/mech/{m['key']}/end",
                                                  "entity_category": "diagnostic"})
     for obj, name, _ in DURATION_BUTTONS:
-        _disc("button", obj, {"name": name, "icon": "mdi:backup-restore" if obj == "backup_now" else "mdi:timer-outline",
+        icon = {"backup_now": "mdi:backup-restore", "scan_now": "mdi:shield-search", "lock_now": "mdi:lock"}.get(obj, "mdi:timer-outline")
+        _disc("button", obj, {"name": name, "icon": icon,
                               "command_topic": f"{BASE}/cmd/button", "payload_press": obj})
     _disc("sensor", "status", {"name": "Gate status", "icon": "mdi:shield-check",
                                "state_topic": f"{BASE}/status/state",
@@ -989,6 +991,9 @@ def publish_discovery():
                                          "state_topic": f"{BASE}/setting/reminder_minutes/state",
                                          "command_topic": f"{BASE}/cmd/setting/reminder_minutes",
                                          "entity_category": "config"})
+    _disc("sensor", "scan", {"name": "Security scan", "icon": "mdi:shield-search",
+                             "state_topic": f"{BASE}/scan/state",
+                             "json_attributes_topic": f"{BASE}/scan/attributes"})
     _disc("sensor", "pending", {"name": "Pending approvals", "icon": "mdi:account-question",
                                 "state_topic": f"{BASE}/pending/state",
                                 "json_attributes_topic": f"{BASE}/pending/attributes"})
@@ -1149,6 +1154,8 @@ def handle_button(obj):
                 _bg(lock_window, "dashboard")
             elif minutes == -2:
                 _bg(backup_now)
+            elif minutes == -3:
+                _bg(run_scan, "manual")
             elif minutes < 0:
                 extend_window(-minutes)
             else:
@@ -1286,10 +1293,17 @@ def dashboard_config():
                "card": {"type": "markdown", "content":
                         "**Commands waiting for your approval** (answer the phone notification)\n"
                         "{% for i in state_attr('sensor.agent_gate_pending','items') or [] %}- `{{ i.id }}` {{ i.command }}\n{% endfor %}"}}
+    scan = [
+        {"type": "button", "name": "Scan now", "icon": "mdi:shield-search", "show_state": False,
+         "tap_action": {"action": "perform-action", "perform_action": "button.press",
+                        "target": {"entity_id": "button.agent_gate_scan_now"}}},
+        {"type": "markdown", "content": "{{ state_attr('sensor.agent_gate_scan','markdown') or 'No scan yet.' }}"},
+    ]
     return {"views": [{"title": "Agent Gate", "path": "gate", "icon": "mdi:shield-lock", "type": "sections",
                        "max_columns": 2, "sections": [
                            {"type": "grid", "cards": [{"type": "markdown", "content": status_md}] + open_all + [pending]},
                            {"type": "grid", "title": "Mechanisms", "cards": mech_cards},
+                           {"type": "grid", "title": "Security scan", "cards": scan},
                            {"type": "grid", "title": "Settings", "cards": settings},
                        ]}]}
 
@@ -1312,6 +1326,262 @@ def ensure_dashboard():
         log(f"dashboard '{DASHBOARD_URL}' created: {ok}" + ("" if ok else f" {res}"))
     except Exception as e:
         log(f"dashboard not created ({e}); you can build one from the entities instead")
+
+
+
+# --------------------------------------------------------------------------
+# 5c. security scan
+# --------------------------------------------------------------------------
+SCANS_PATH = os.path.join(DATA_DIR, "scans.jsonl")
+SCAN_LOCK = threading.Lock()
+LAST_SCAN = {}
+SEV_ORDER = {"critical": 0, "warning": 1, "info": 2, "ok": 3}
+SCAN_STRINGS = {
+    "en": {
+        "sev": {"critical": "CRITICAL", "warning": "Warning", "info": "Info", "ok": "OK"},
+        "report_title": "Security scan", "no_findings": "Nothing to report.",
+        "summary": "{c} critical, {w} warnings, {i} notes",
+        "fix": "Fix", "scan_failed": "Scan failed: {e}",
+        "notify_title": "Agent Gate: security scan", "notify_new": "New critical findings:",
+        "f_open": ("Open mechanisms", "{names} open since {since}.", "Close what you are not using."),
+        "f_deviation": ("Add-on running without a window", "{names}", "Open a window for it or let the gate stop it."),
+        "f_protection": ("Add-on with protection mode off", "{names}", "Turn protection mode back on in the add-on's settings unless it truly needs host access."),
+        "f_hostnet": ("Add-on on the host network", "{names}", "Review whether host networking is needed; it bypasses the add-on sandbox."),
+        "f_ports": ("Add-ons with ports exposed on the host", "{names}", "Close ports you do not use from outside (add-on Configuration, Network)."),
+        "f_tokens": ("Long-lived access tokens", "{n} token(s): {names}", "Delete tokens you no longer use (your profile, Security tab)."),
+        "f_backup_old": ("Last full backup is old", "{age} hours.", "Run a backup (Settings, Backups) or set backup_policy to always."),
+        "f_backup_none": ("No full backup found", "", "Create one now from the dashboard (Backup now)."),
+        "f_update_core": ("Home Assistant update available", "{cur} -> {latest}", "Update after a backup."),
+        "f_update_os": ("Operating system update available", "{cur} -> {latest}", "Update after a backup."),
+        "f_update_sup": ("Supervisor update available", "{cur} -> {latest}", "Updates automatically; check the Supervisor log if it stays."),
+        "f_update_addons": ("Add-on updates available", "{names}", "Update from the add-on store."),
+        "f_ssh_pw": ("SSH add-on accepts a password", "{names}", "Use an authorized key and clear the password in the SSH add-on options."),
+        "f_addon_pw": ("Add-on with a password in its options", "{names}", "Prefer tokens/keys; make sure the password is strong."),
+        "f_tunnel": ("Remote access tunnel running", "{names}", "Make sure the tunnel requires login (Cloudflare Access) and does not expose add-on ports."),
+        "f_package": ("Gate backstop automations missing", "{names}", "Copy ha/agent_gate_package.yaml to /homeassistant/packages and restart HA."),
+        "f_upstream": ("Gate has no upstream MCP URL", "", "Set upstream_mcp_url in the add-on options."),
+        "f_gate_ok": ("Gate", "Locked, no deviation, backstop automations present.", ""),
+    },
+    "he": {
+        "sev": {"critical": "קריטי", "warning": "אזהרה", "info": "מידע", "ok": "תקין"},
+        "report_title": "סריקת אבטחה", "no_findings": "אין ממצאים.",
+        "summary": "{c} קריטיים, {w} אזהרות, {i} הערות",
+        "fix": "תיקון", "scan_failed": "הסריקה נכשלה: {e}",
+        "notify_title": "שער הסוכן: סריקת אבטחה", "notify_new": "ממצאים קריטיים חדשים:",
+        "f_open": ("מנגנונים פתוחים", "{names} פתוחים מאז {since}.", "סגור מה שאתה לא משתמש בו."),
+        "f_deviation": ("תוסף רץ בלי חלון", "{names}", "פתח לו חלון או תן לשער לעצור אותו."),
+        "f_protection": ("תוסף עם מצב הגנה כבוי", "{names}", "החזר את מצב ההגנה בהגדרות התוסף, אלא אם הוא באמת צריך גישה למארח."),
+        "f_hostnet": ("תוסף ברשת המארח", "{names}", "בדוק אם נדרש; זה עוקף את ארגז החול של התוסף."),
+        "f_ports": ("תוספים עם פורטים פתוחים במארח", "{names}", "סגור פורטים שלא נחוצים מבחוץ (הגדרות התוסף, רשת)."),
+        "f_tokens": ("טוקנים ארוכי טווח", "{n} טוקנים: {names}", "מחק טוקנים שכבר לא בשימוש (הפרופיל שלך, לשונית אבטחה)."),
+        "f_backup_old": ("הגיבוי המלא האחרון ישן", "{age} שעות.", "הרץ גיבוי (הגדרות, גיבויים) או קבע מדיניות גיבוי always."),
+        "f_backup_none": ("לא נמצא גיבוי מלא", "", "צור אחד עכשיו מהדשבורד (גבה עכשיו)."),
+        "f_update_core": ("עדכון Home Assistant זמין", "{cur} -> {latest}", "עדכן אחרי גיבוי."),
+        "f_update_os": ("עדכון מערכת הפעלה זמין", "{cur} -> {latest}", "עדכן אחרי גיבוי."),
+        "f_update_sup": ("עדכון Supervisor זמין", "{cur} -> {latest}", "מתעדכן לבד; אם נשאר, בדוק את לוג ה-Supervisor."),
+        "f_update_addons": ("עדכוני תוספים זמינים", "{names}", "עדכן מחנות התוספים."),
+        "f_ssh_pw": ("תוסף SSH מקבל סיסמה", "{names}", "השתמש במפתח ונקה את הסיסמה בהגדרות תוסף ה-SSH."),
+        "f_addon_pw": ("תוסף עם סיסמה בהגדרות", "{names}", "עדיף טוקנים/מפתחות; ודא שהסיסמה חזקה."),
+        "f_tunnel": ("מנהרת גישה מרחוק פעילה", "{names}", "ודא שהמנהרה דורשת התחברות (Cloudflare Access) ולא חושפת פורטים של תוספים."),
+        "f_package": ("אוטומציות הגיבוי של השער חסרות", "{names}", "העתק את ha/agent_gate_package.yaml ל-/homeassistant/packages והפעל מחדש את HA."),
+        "f_upstream": ("לשער אין כתובת MCP", "", "קבע upstream_mcp_url בהגדרות התוסף."),
+        "f_gate_ok": ("השער", "נעול, אין סטייה, אוטומציות הגיבוי קיימות.", ""),
+    },
+}
+
+
+def TS(key, **kw):
+    v = SCAN_STRINGS.get(LANG, SCAN_STRINGS["en"]).get(key) or SCAN_STRINGS["en"].get(key, key)
+    if isinstance(v, str) and kw:
+        return v.format(**kw)
+    return v
+
+
+def _finding(sev, key, **kw):
+    title, detail, fix = TS(key)
+    return {"severity": sev, "key": key, "title": title,
+            "detail": detail.format(**kw) if kw else detail, "fix": fix}
+
+
+def _ws_tokens():
+    """Long-lived tokens via the HA websocket (may be refused for the add-on user)."""
+    try:
+        res = _ws_call([{"type": "auth/refresh_tokens"}])
+        toks = res[0].get("result") or []
+        return [t.get("client_name") or t.get("client_id") or "?" for t in toks
+                if t.get("type") == "long_lived_access_token"]
+    except Exception as e:
+        log(f"token listing unavailable: {e}")
+        return None
+
+
+def run_scan(source="manual"):
+    if not SCAN_LOCK.acquire(blocking=False):
+        log("scan already running")
+        return
+    try:
+        findings = []
+        now = now_utc()
+        # 1. gate state
+        actual = _LAST_ACTUAL or actual_states()
+        windows = active_windows()
+        if windows:
+            since = min((w.get("opened_at") or iso(now)) for w in windows.values())
+            findings.append(_finding("info", "f_open", names=", ".join(mech_name(k) for k in windows),
+                                     since=fmt_local(since)))
+        dev = compute_deviation(actual)
+        if dev:
+            findings.append(_finding("critical", "f_deviation", names=", ".join(mech_name(k) for k in dev)))
+        if not UPSTREAM.hostname:
+            findings.append(_finding("warning", "f_upstream"))
+        # backstop automations
+        try:
+            code, states = _sup_request("GET", "/core/api/states", timeout=30)
+            ids = {s.get("entity_id") for s in (states if isinstance(states, list) else [])}
+        except Exception:
+            ids = set()
+        missing = [a for a in ("automation.agent_gate_guard_when_gate_is_offline",
+                               "automation.agent_gate_guard_on_long_deviation",
+                               "automation.agent_gate_relay_phone_actions") if ids and a not in ids]
+        if missing:
+            findings.append(_finding("warning", "f_package", names=", ".join(missing)))
+        if not windows and not dev and not missing and UPSTREAM.hostname:
+            findings.append(_finding("ok", "f_gate_ok"))
+        # 2. add-ons
+        unprotected, hostnet, ports, addon_updates, ssh_pw, addon_pw, tunnels = [], [], [], [], [], [], []
+        try:
+            code, data = _sup_request("GET", "/addons", timeout=30)
+            addons = data.get("data", {}).get("addons", []) if code == 200 else []
+        except Exception:
+            addons = []
+        for a in addons:
+            slug = a.get("slug")
+            if not slug or a.get("state") != "started" and not a.get("update_available"):
+                continue
+            try:
+                code, info = _sup_request("GET", f"/addons/{slug}/info", timeout=20)
+                info = info.get("data", {}) if code == 200 else {}
+            except Exception:
+                info = {}
+            name = info.get("name") or a.get("name") or slug
+            running = info.get("state") == "started"
+            if info.get("update_available") or a.get("update_available"):
+                addon_updates.append(f"{name} ({info.get('version')} -> {info.get('version_latest')})")
+            if not running:
+                continue
+            if slug != SELF_SLUG and info.get("protected") is False:
+                unprotected.append(name)
+            if info.get("host_network"):
+                hostnet.append(name)
+            net = info.get("network") or {}
+            mapped = [str(v) for v in net.values() if v]
+            if mapped and slug != SELF_SLUG:
+                ports.append(f"{name} ({', '.join(mapped)})")
+            opts = info.get("options") or {}
+            pw = opts.get("password")
+            if "ssh" in slug and pw:
+                ssh_pw.append(name)
+            elif pw and isinstance(pw, str):
+                addon_pw.append(name)
+            if any(t in slug for t in ("cloudflared", "ngrok", "tailscale", "zerotier", "wireguard")):
+                tunnels.append(name)
+        if unprotected:
+            findings.append(_finding("critical", "f_protection", names=", ".join(unprotected)))
+        if ssh_pw:
+            findings.append(_finding("warning", "f_ssh_pw", names=", ".join(ssh_pw)))
+        if hostnet:
+            findings.append(_finding("info", "f_hostnet", names=", ".join(hostnet)))
+        if ports:
+            findings.append(_finding("info", "f_ports", names=", ".join(ports)))
+        if addon_pw:
+            findings.append(_finding("info", "f_addon_pw", names=", ".join(addon_pw)))
+        if tunnels:
+            findings.append(_finding("info", "f_tunnel", names=", ".join(tunnels)))
+        if addon_updates:
+            findings.append(_finding("info", "f_update_addons", names=", ".join(addon_updates)))
+        # 3. core / os / supervisor updates
+        for path, key in (("/core/info", "f_update_core"), ("/os/info", "f_update_os"),
+                          ("/supervisor/info", "f_update_sup")):
+            try:
+                code, d = _sup_request("GET", path, timeout=20)
+                d = d.get("data", {}) if code == 200 else {}
+                if d.get("update_available"):
+                    findings.append(_finding("warning" if key == "f_update_core" else "info", key,
+                                             cur=d.get("version"), latest=d.get("version_latest")))
+            except Exception:
+                pass
+        # 4. backups
+        age = latest_full_backup_age_hours()
+        if age is None:
+            findings.append(_finding("warning", "f_backup_none"))
+        elif age > 48:
+            findings.append(_finding("warning", "f_backup_old", age=int(age)))
+        # 5. tokens
+        toks = _ws_tokens()
+        if toks:
+            findings.append(_finding("info", "f_tokens", n=len(toks), names=", ".join(toks[:10])))
+        findings.sort(key=lambda f: SEV_ORDER.get(f["severity"], 9))
+        counts = {s: sum(1 for f in findings if f["severity"] == s) for s in SEV_ORDER}
+        report = {"ts": iso(now), "source": source, "counts": counts, "findings": findings,
+                  "markdown": scan_markdown(findings, now)}
+        # notify on new critical findings
+        prev = {f["key"] for f in LAST_SCAN.get("findings", []) if f["severity"] == "critical"}
+        new_crit = [f for f in findings if f["severity"] == "critical" and f["key"] not in prev]
+        LAST_SCAN.clear()
+        LAST_SCAN.update(report)
+        _append_jsonl(SCANS_PATH, {k: v for k, v in report.items() if k != "markdown"})
+        if new_crit and source != "startup":
+            notify(TS("notify_title"), TS("notify_new") + "\n" + "\n".join(f"- {f['title']}: {f['detail']}" for f in new_crit),
+                   tag="agent_gate_scan")
+        publish_scan()
+        log(f"scan done: {counts}")
+    except Exception as e:
+        log(f"scan error: {e}")
+        LAST_SCAN.clear()
+        LAST_SCAN.update({"ts": iso(now_utc()), "counts": {}, "findings": [],
+                          "markdown": TS("scan_failed", e=str(e))})
+        publish_scan()
+    finally:
+        SCAN_LOCK.release()
+
+
+def scan_markdown(findings, when):
+    icons = {"critical": "🔴", "warning": "🟠", "info": "🔵", "ok": "🟢"}
+    lines = [f"**{TS('report_title')}** · {when.astimezone().strftime('%d/%m %H:%M')}"]
+    c = sum(1 for f in findings if f["severity"] == "critical")
+    w = sum(1 for f in findings if f["severity"] == "warning")
+    i = sum(1 for f in findings if f["severity"] == "info")
+    lines.append(TS("summary", c=c, w=w, i=i))
+    if not findings:
+        lines.append(TS("no_findings"))
+    for f in findings:
+        line = f"{icons.get(f['severity'], '')} **{f['title']}**"
+        if f["detail"]:
+            line += f": {f['detail']}"
+        lines.append(line)
+        if f["fix"]:
+            lines.append(f"  · {TS('fix')}: {f['fix']}")
+    return "\n\n".join(lines)
+
+
+def publish_scan():
+    if not MQTT_CLIENT or not LAST_SCAN:
+        return
+    counts = LAST_SCAN.get("counts", {})
+    state = "critical" if counts.get("critical") else ("warning" if counts.get("warning") else "ok")
+    MQTT_CLIENT.publish(f"{BASE}/scan/state", state, qos=1, retain=True)
+    MQTT_CLIENT.publish(f"{BASE}/scan/attributes", json.dumps({
+        "ts": LAST_SCAN.get("ts"), "counts": counts, "findings": LAST_SCAN.get("findings", []),
+        "markdown": LAST_SCAN.get("markdown", "")}, ensure_ascii=False), qos=1, retain=True)
+
+
+def scan_loop():
+    hours = int(OPT.get("scan_interval_hours") or 0)
+    time.sleep(90)
+    run_scan("startup")
+    while hours:
+        time.sleep(hours * 3600)
+        run_scan("scheduled")
 
 
 # --------------------------------------------------------------------------
@@ -1685,6 +1955,8 @@ def main():
         threading.Thread(target=ensure_dashboard, daemon=True).start()
     publish_all(actual=actual_states() if SUPERVISOR_TOKEN else {})
     threading.Thread(target=timer_loop, daemon=True).start()
+    if SUPERVISOR_TOKEN:
+        threading.Thread(target=scan_loop, daemon=True).start()
     log("=" * 60)
     log(f"MCP gate endpoint: http://<home-assistant-ip>:{port}{ENDPOINT_PATH}")
     log("Set this as 'MCP server URL' in the Webhook Proxy add-on.")

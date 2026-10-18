@@ -29,6 +29,9 @@ configuration:
   create_dashboard:
     name: יצירת דשבורד Agent Gate
     description: בהפעלה, יצירת דשבורד מוכן "Agent Gate" בסרגל הצד אם עדיין לא קיים.
+  scan_interval_hours:
+    name: סריקת אבטחה כל (שעות)
+    description: הרצת סריקת האבטחה לפי לוח זמנים. 0 = רק מכפתור סרוק עכשיו. סריקה רצה גם 90 שניות אחרי כל הפעלה.
   read_tool_patterns:
     name: תבניות כלי קריאה
     description: כלי MCP שתואמים לתבניות האלה מותרים תמיד (הם רק קוראים).
