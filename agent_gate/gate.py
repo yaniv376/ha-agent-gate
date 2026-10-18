@@ -45,6 +45,10 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 try:
+    import websocket  # websocket-client, used once to create the ready-made dashboard
+except Exception:  # pragma: no cover
+    websocket = None
+try:
     import paho.mqtt.client as mqtt
 except Exception:  # pragma: no cover - the image always has it
     mqtt = None
@@ -52,6 +56,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
+VERSION = "0.2.0"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -100,11 +105,11 @@ def load_options():
         "reminder_minutes": 60,
         "deviation_grace_minutes": 5,
         "approval_timeout_minutes": 3,
-        "backup_on_open": True,
-        "backup_mode": "always",
-        "backup_min_interval_hours": 6,
-        "backup_skip_windows_up_to_minutes": 0,
+        "backup_policy": "always",
+        "backup_skip_short": False,
+        "language": "en",
         "default_window_minutes": 30,
+        "create_dashboard": True,
         "read_tool_patterns": ["ha_get_*", "ha_list_*", "ha_search", "ha_config_get_*",
                                "ha_config_list_*", "ha_read_file", "ha_eval_template",
                                "ha_get_skill_guide", "ha_report_issue"],
@@ -160,11 +165,10 @@ STATE_LOCK = threading.RLock()
 
 def default_state():
     return {
-        "mode": "locked",            # locked | open
-        "window_id": None,
+        "mode": "locked",            # locked | opening | open (derived from windows)
+        "window_id": None,           # session id: first open -> last close
         "opened_at": None,
-        "window_end": None,          # None while open == "until I close"
-        "desired": {m["key"]: m["default_on"] for m in MECHANISMS},
+        "windows": {},               # mechanism key -> {"end": iso|None, "opened_at": iso}
         "last_reminder": None,
         "deviation_since": None,
         "deviation_notified": False,
@@ -179,8 +183,17 @@ def load_state():
         base = default_state()
         for k, v in st.items():
             base[k] = v
-        for m in MECHANISMS:
-            base["desired"].setdefault(m["key"], m["default_on"])
+        # migrate a 0.1.x state (single window + desired set)
+        if "desired" in base and not base.get("windows"):
+            if base.get("mode") == "open":
+                end = base.get("window_end")
+                base["windows"] = {k: {"end": end, "opened_at": base.get("opened_at")}
+                                   for k, on in base["desired"].items() if on and k in MECH_BY_KEY}
+            base.pop("desired", None)
+            base.pop("window_end", None)
+        base["windows"] = {k: v for k, v in (base.get("windows") or {}).items() if k in MECH_BY_KEY}
+        if base.get("mode") != "opening":
+            base["mode"] = "open" if base["windows"] else "locked"
         return base
     except Exception:
         return default_state()
@@ -189,12 +202,13 @@ def load_state():
 STATE = load_state()
 
 SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
+BACKUP_POLICIES = {"always": None, "every_6h": 6, "daily": 24, "never": None}
 SETTINGS_KEYS = {
-    "backup_mode": ("always", "if_stale", "never"),
-    "backup_min_interval_hours": (1, 168),
-    "backup_skip_windows_up_to_minutes": (0, 1440),
+    "backup_policy": tuple(BACKUP_POLICIES),
+    "backup_skip_short": ("ON", "OFF"),
     "reminder_minutes": (0, 1440),
 }
+SHORT_WINDOW_MINUTES = 15
 
 
 def load_settings():
@@ -220,6 +234,9 @@ def set_setting(key, value):
     if spec is None:
         return False
     if isinstance(spec[0], str):
+        value = str(value).strip()
+        if key == "backup_skip_short":
+            value = "ON" if value.upper() in ("ON", "TRUE", "1") else "OFF"
         if value not in spec:
             return False
     else:
@@ -235,6 +252,67 @@ def set_setting(key, value):
         log(f"could not persist settings: {e}")
     log(f"setting {key} = {value}")
     return True
+
+
+def backup_policy():
+    v = setting("backup_policy")
+    if v in BACKUP_POLICIES:
+        return v
+    # 0.1.x options
+    mode = OPT.get("backup_mode")
+    if mode == "never" or OPT.get("backup_on_open") is False:
+        return "never"
+    if mode == "if_stale":
+        return "daily" if int(OPT.get("backup_min_interval_hours") or 6) >= 12 else "every_6h"
+    return "always"
+
+
+def backup_skip_short():
+    v = setting("backup_skip_short")
+    if isinstance(v, str):
+        return v.upper() == "ON"
+    if v is None:
+        return int(OPT.get("backup_skip_windows_up_to_minutes") or 0) > 0
+    return bool(v)
+
+
+LANG = "he" if str(OPT.get("language") or "en").lower().startswith("he") else "en"
+STRINGS = {
+    "en": {
+        "title": "Agent Gate", "title_open": "Agent Gate OPEN", "title_locked": "Agent Gate LOCKED",
+        "title_still_open": "Agent Gate still OPEN", "title_deviation": "Agent Gate: deviation",
+        "until": "until", "until_closed": "until you close it",
+        "backup_failed": "Backup failed. Nothing was opened.",
+        "backup_failed_plain": "Backup failed.", "backup_done": "Backup created.",
+        "closed_expired": "{names}: time is up, closed.",
+        "locked_line": "Locked ({reason}). {n} command(s) ran.",
+        "changed_files": "Changed files: {n}",
+        "deviation_body": "{names} running while the gate says it should be off. "
+                          "Stopping in {mins} min unless you open a window.",
+        "btn_lock": "Lock now", "btn_plus_hour": "+1 hour", "btn_open_hour": "Open 1 hour",
+        "btn_stop_now": "Stop it now",
+        "approve_title": "Agent Gate: approve command?", "btn_approve": "Approve", "btn_reject": "Reject",
+    },
+    "he": {
+        "title": "שער הסוכן", "title_open": "שער הסוכן פתוח", "title_locked": "שער הסוכן נעול",
+        "title_still_open": "שער הסוכן עדיין פתוח", "title_deviation": "שער הסוכן: סטייה",
+        "until": "עד", "until_closed": "עד שתסגור",
+        "backup_failed": "הגיבוי נכשל. שום דבר לא נפתח.",
+        "backup_failed_plain": "הגיבוי נכשל.", "backup_done": "הגיבוי נוצר.",
+        "closed_expired": "{names}: הזמן נגמר, נסגר.",
+        "locked_line": "ננעל ({reason}). רצו {n} פקודות.",
+        "changed_files": "קבצים ששונו: {n}",
+        "deviation_body": "{names} רץ בזמן שהשער נעול. ייסגר בעוד {mins} דקות אם לא תפתח חלון.",
+        "btn_lock": "נעל עכשיו", "btn_plus_hour": "+ שעה", "btn_open_hour": "פתח לשעה",
+        "btn_stop_now": "עצור עכשיו",
+        "approve_title": "שער הסוכן: לאשר פקודה?", "btn_approve": "אשר", "btn_reject": "דחה",
+    },
+}
+
+
+def T(key, **kw):
+    s = STRINGS.get(LANG, STRINGS["en"]).get(key) or STRINGS["en"].get(key, key)
+    return s.format(**kw) if kw else s
 
 
 def save_state():
@@ -352,19 +430,18 @@ def latest_full_backup_age_hours():
 
 def backup_needed(minutes):
     """Apply the user's backup policy. Returns (needed, reason)."""
-    mode = str(setting("backup_mode") or ("always" if OPT.get("backup_on_open", True) else "never"))
-    skip_short = int(setting("backup_skip_windows_up_to_minutes") or 0)
-    if mode == "never":
-        return False, "backup_mode=never"
-    if skip_short and minutes and minutes <= skip_short:
-        return False, f"window of {minutes} min is within backup_skip_windows_up_to_minutes={skip_short}"
-    if mode == "if_stale":
-        max_age = float(setting("backup_min_interval_hours") or 6)
+    pol = backup_policy()
+    if pol == "never":
+        return False, "policy=never"
+    if backup_skip_short() and minutes and minutes <= SHORT_WINDOW_MINUTES:
+        return False, f"short window ({minutes} min) and backup_skip_short is on"
+    max_age = BACKUP_POLICIES.get(pol)
+    if max_age:
         age = latest_full_backup_age_hours()
         if age is not None and age < max_age:
-            return False, f"last full backup is {age:.1f} h old (< {max_age:g} h)"
-        return True, "no recent full backup" if age is None else f"last full backup is {age:.1f} h old"
-    return True, "backup_mode=always"
+            return False, f"policy={pol}, last full backup is {age:.1f} h old"
+        return True, f"policy={pol}, " + ("no full backup found" if age is None else f"last full backup is {age:.1f} h old")
+    return True, "policy=always"
 
 
 def ha_call_service(domain, service, payload):
@@ -440,18 +517,40 @@ def evaluate_tool_call(name, arguments):
         return "allow", "read tool"
     if name not in PROTECTED_EXEMPT and (touches_protected(arguments) or any(p in name.lower() for p in PROTECTED)):
         return "deny", "touches the gate's own entities or topics; only the dashboard controls the gate"
-    with STATE_LOCK:
-        if STATE["mode"] == "open" and STATE["desired"].get("ha_write", False):
-            return "allow", "window open"
-    return "deny", ("Agent Gate is LOCKED. Write tools are refused until the user opens a "
-                    "window from the dashboard. Ask the user to open the gate, then retry.")
+    if is_active("ha_write"):
+        return "allow", "window open"
+    return "deny", ("Agent Gate is LOCKED for HA writes. Write tools are refused until the user opens "
+                    "the 'HA write' mechanism from the dashboard. Ask the user to open the gate, then retry.")
 
 
 # --------------------------------------------------------------------------
-# 4. window engine
+# 4. window engine (per-mechanism windows)
+#
+# STATE["windows"] maps mechanism key -> {"end": iso | None, "opened_at": iso}.
+# A mechanism is OPEN while it has an entry; end None means "until closed".
+# STATE["mode"] is derived: "opening" while a backup runs, "open" while any
+# mechanism is open, else "locked". A "session" runs from the first open to
+# the moment the last mechanism closes; the summary notification covers it.
 # --------------------------------------------------------------------------
 def addon_mechanisms():
     return [m for m in MECHANISMS if m["addons"]]
+
+
+def active_windows():
+    with STATE_LOCK:
+        return {k: dict(v) for k, v in STATE.get("windows", {}).items()}
+
+
+def is_active(key):
+    with STATE_LOCK:
+        return key in STATE.get("windows", {})
+
+
+def _recompute_mode():
+    """Caller holds STATE_LOCK."""
+    if STATE["mode"] == "opening":
+        return
+    STATE["mode"] = "open" if STATE.get("windows") else "locked"
 
 
 def actual_states():
@@ -460,35 +559,27 @@ def actual_states():
     for m in addon_mechanisms():
         states = {slug: addon_state(slug) for slug in m["addons"]}
         out[m["key"]] = {"running": any(s == "started" for s in states.values()), "addons": states}
-    with STATE_LOCK:
-        open_ = STATE["mode"] == "open"
-        out["ha_write"] = {"running": open_ and STATE["desired"].get("ha_write", False)}
-        out["commands"] = {"running": open_ and STATE["desired"].get("commands", False)}
+    out["ha_write"] = {"running": is_active("ha_write")}
+    out["commands"] = {"running": is_active("commands")}
     return out
 
 
 def compute_deviation(actual):
-    """Locked but an editing add-on is running -> deviation (security issue).
-    Open but an enabled mechanism is stopped -> informational only."""
-    with STATE_LOCK:
-        locked = STATE["mode"] != "open"
-        desired = dict(STATE["desired"])
-    dev = []
-    for m in addon_mechanisms():
-        a = actual.get(m["key"], {})
-        if locked and a.get("running"):
-            dev.append(m["key"])
-        elif not locked and not desired.get(m["key"]) and a.get("running"):
-            dev.append(m["key"])
-    return dev
+    """An add-on-backed mechanism running without an open window is a deviation."""
+    active = active_windows()
+    return [m["key"] for m in addon_mechanisms()
+            if m["key"] not in active and actual.get(m["key"], {}).get("running")]
 
 
-def apply_addons(open_):
-    with STATE_LOCK:
-        desired = dict(STATE["desired"])
+def apply_addons(keys=None):
+    """Start add-ons of open mechanisms, stop add-ons of closed ones (in parallel).
+    keys=None means reconcile every mechanism."""
+    active = active_windows()
     jobs = []
     for m in addon_mechanisms():
-        want = open_ and desired.get(m["key"], False)
+        if keys is not None and m["key"] not in keys:
+            continue
+        want = m["key"] in active
         for slug in m["addons"]:
             st = addon_state(slug)
             if want and st != "started":
@@ -502,74 +593,99 @@ def apply_addons(open_):
         t.join(timeout=180)
 
 
-def open_window(minutes, source="dashboard"):
-    """minutes == 0 means 'until I close'."""
-    with STATE_LOCK:
-        if STATE["mode"] == "opening":
-            log("open requested while an open is already in progress; ignored")
-            return
-        if STATE["mode"] == "open":
-            # Already open: treat as extension to the requested length from now.
-            STATE["window_end"] = iso(now_utc() + timedelta(minutes=minutes)) if minutes else None
+def mech_name(key):
+    return MECH_BY_KEY.get(key, {}).get("name", key)
+
+
+def describe_windows():
+    """'SSH until 15:30, HA write until you close it'"""
+    parts = []
+    for k, w in sorted(active_windows().items(), key=lambda kv: kv[1].get("end") or "9"):
+        parts.append(f"{mech_name(k)} {T('until')} {fmt_local(w['end'])}" if w.get("end")
+                     else f"{mech_name(k)} {T('until_closed')}")
+    return ", ".join(parts)
+
+
+OPEN_LOCK = threading.Lock()
+
+
+def open_mechs(keys, minutes, source="dashboard"):
+    """Open (or re-time) the given mechanisms. minutes == 0 means 'until closed'."""
+    keys = [k for k in keys if k in MECH_BY_KEY]
+    if not keys:
+        return
+    if not OPEN_LOCK.acquire(blocking=False):
+        log("open requested while an open is already in progress; ignored")
+        return
+    try:
+        new_end = iso(now_utc() + timedelta(minutes=minutes)) if minutes else None
+        with STATE_LOCK:
+            first_open = not STATE.get("windows")
+            if first_open:
+                STATE["window_id"] = uuid.uuid4().hex[:8]
+                STATE["opened_at"] = iso(now_utc())
+                STATE["last_reminder"] = STATE["opened_at"]
+                STATE["deviation_since"] = None
+                STATE["deviation_notified"] = False
+                STATE["mode"] = "opening"
+            wid = STATE["window_id"]
             save_state()
-            log(f"window re-timed: {STATE['window_end']}")
-            publish_all()
-            return
-        STATE["mode"] = "opening"
-        STATE["window_id"] = uuid.uuid4().hex[:8]
-        STATE["opened_at"] = iso(now_utc())
-        STATE["window_end"] = iso(now_utc() + timedelta(minutes=minutes)) if minutes else None
-        STATE["last_reminder"] = STATE["opened_at"]
-        STATE["deviation_since"] = None
-        STATE["deviation_notified"] = False
-        wid = STATE["window_id"]
-        save_state()
-    publish_all()
-    backup = None
-    need, why = backup_needed(minutes)
-    log(f"backup before opening: {'yes' if need else 'skipped'} ({why})")
-    if need:
-        backup = create_full_backup(f"agent_gate_{datetime.now().strftime('%Y%m%d_%H%M')}")
-        if not backup:
-            notify("Agent Gate", "Backup failed. The window was NOT opened.", tag="agent_gate_window")
-            with STATE_LOCK:
-                STATE["mode"] = "locked"
-                save_state()
-            publish_all()
-            return
-    with STATE_LOCK:
-        STATE["mode"] = "open"
-        STATE["backup"] = backup
-        if backup:
-            STATE["last_backup_at"] = iso(now_utc())
-        save_state()
-    apply_addons(True)
-    _append_jsonl(HISTORY_PATH, {"event": "open", "window_id": wid, "ts": iso(now_utc()),
-                                 "minutes": minutes, "source": source, "backup": backup,
-                                 "desired": STATE["desired"]})
-    with STATE_LOCK:
-        end = STATE["window_end"]
-    notify("Agent Gate OPEN", f"Window open until {fmt_local(end) if end else 'you close it'}.",
-           actions=[{"action": "AGENT_GATE_LOCK", "title": "Lock now"},
-                    {"action": "AGENT_GATE_EXTEND_60", "title": "+1 hour"}],
-           tag="agent_gate_window")
-    publish_all()
-    log("window OPEN")
+        publish_all()
+        backup = None
+        if first_open:
+            need, why = backup_needed(minutes)
+            log(f"backup before opening: {'yes' if need else 'skipped'} ({why})")
+            if need:
+                backup = create_full_backup(f"agent_gate_{datetime.now().strftime('%Y%m%d_%H%M')}")
+                if not backup:
+                    notify(T("title"), T("backup_failed"), tag="agent_gate_window")
+                    with STATE_LOCK:
+                        STATE["mode"] = "locked"
+                        save_state()
+                    publish_all()
+                    return
+        with STATE_LOCK:
+            for k in keys:
+                prev = STATE["windows"].get(k, {})
+                STATE["windows"][k] = {"end": new_end, "opened_at": prev.get("opened_at") or iso(now_utc())}
+            if backup:
+                STATE["backup"] = backup
+                STATE["last_backup_at"] = iso(now_utc())
+            STATE["mode"] = "open"
+            save_state()
+        apply_addons(keys)
+        _append_jsonl(HISTORY_PATH, {"event": "open", "window_id": wid, "ts": iso(now_utc()),
+                                     "mechanisms": keys, "minutes": minutes, "source": source,
+                                     "backup": backup})
+        notify(T("title_open"), describe_windows(),
+               actions=[{"action": "AGENT_GATE_LOCK", "title": T("btn_lock")},
+                        {"action": "AGENT_GATE_EXTEND_60", "title": T("btn_plus_hour")}],
+               tag="agent_gate_window")
+        publish_all()
+        log(f"OPEN {keys} for {minutes or 'unlimited'} min")
+    finally:
+        OPEN_LOCK.release()
 
 
-def extend_window(minutes):
+def extend_mechs(keys, minutes):
     with STATE_LOCK:
-        if STATE["mode"] != "open":
-            return
-        base = parse_iso(STATE["window_end"]) or now_utc()
-        if base < now_utc():
-            base = now_utc()
-        STATE["window_end"] = iso(base + timedelta(minutes=minutes))
-        save_state()
-        end = STATE["window_end"]
-    _append_jsonl(HISTORY_PATH, {"event": "extend", "ts": iso(now_utc()), "minutes": minutes})
-    publish_all()
-    log(f"window extended to {end}")
+        touched = []
+        for k in keys:
+            w = STATE["windows"].get(k)
+            if not w:
+                continue
+            base = parse_iso(w.get("end")) or now_utc()
+            if base < now_utc():
+                base = now_utc()
+            w["end"] = iso(base + timedelta(minutes=minutes))
+            touched.append(k)
+        if touched:
+            save_state()
+    if touched:
+        _append_jsonl(HISTORY_PATH, {"event": "extend", "ts": iso(now_utc()),
+                                     "mechanisms": touched, "minutes": minutes})
+        publish_all()
+        log(f"extended {touched} by {minutes} min")
 
 
 def changed_files_since(since_dt, limit=200):
@@ -594,18 +710,33 @@ def changed_files_since(since_dt, limit=200):
     return out
 
 
-def lock_window(reason="dashboard"):
+def close_mechs(keys, reason="dashboard"):
+    """Close the given mechanisms. When the last one closes, the session ends
+    with a summary notification."""
     with STATE_LOCK:
-        was_open = STATE["mode"] in ("open", "opening")
+        closed = [k for k in keys if k in STATE["windows"]]
+        for k in closed:
+            del STATE["windows"][k]
+        session_over = bool(closed) and not STATE["windows"]
         wid = STATE.get("window_id")
         opened_at = parse_iso(STATE.get("opened_at"))
-        STATE["mode"] = "locked"
-        STATE["window_end"] = None
-        STATE["pending"] = {}
+        if session_over or not STATE["windows"]:
+            STATE["mode"] = "locked"
+            STATE["pending"] = {}
+        else:
+            STATE["mode"] = "open"
         save_state()
-    apply_addons(False)
+    apply_addons(closed if closed else None)
     publish_all()
-    if was_open:
+    if closed and not session_over:
+        _append_jsonl(HISTORY_PATH, {"event": "close", "window_id": wid, "ts": iso(now_utc()),
+                                     "mechanisms": closed, "reason": reason})
+        if reason == "timer expired":
+            notify(T("title"), T("closed_expired", names=", ".join(mech_name(k) for k in closed)),
+                   tag="agent_gate_mech")
+        log(f"closed {closed} ({reason})")
+        return
+    if session_over:
         cmds = []
         try:
             with open(COMMANDS_PATH, encoding="utf-8") as f:
@@ -621,14 +752,27 @@ def lock_window(reason="dashboard"):
         changed = changed_files_since(opened_at) if opened_at else []
         _append_jsonl(HISTORY_PATH, {"event": "lock", "window_id": wid, "ts": iso(now_utc()),
                                      "reason": reason, "commands": len(cmds), "changed_files": changed})
-        lines = [f"Locked ({reason}). {len(cmds)} command(s) ran."]
+        lines = [T("locked_line", reason=reason, n=len(cmds))]
         for c in cmds[-15:]:
             lines.append(f"- {c.get('ts', '')[11:16]} rc={c.get('rc')} {c.get('command', '')[:80]}")
-        lines.append(f"Changed files: {len(changed)}" + (" (first 20)" if len(changed) > 20 else ""))
+        lines.append(T("changed_files", n=len(changed)) + (" (20)" if len(changed) > 20 else ""))
         for p in changed[:20]:
             lines.append(f"- {p}")
-        notify("Agent Gate LOCKED", "\n".join(lines), tag="agent_gate_window")
-    log(f"window LOCKED ({reason})")
+        notify(T("title_locked"), "\n".join(lines), tag="agent_gate_window")
+    log(f"LOCKED ({reason})")
+
+
+def open_window(minutes, source="dashboard"):
+    """Full window: every mechanism marked default_on."""
+    open_mechs([m["key"] for m in MECHANISMS if m["default_on"]], minutes, source)
+
+
+def extend_window(minutes):
+    extend_mechs(list(active_windows().keys()), minutes)
+
+
+def lock_window(reason="dashboard"):
+    close_mechs(list(MECH_BY_KEY.keys()), reason)
 
 
 def fmt_local(iso_s):
@@ -639,29 +783,28 @@ def fmt_local(iso_s):
 
 
 def timer_loop():
-    """Every 10 s: expiry, reminders, deviation grace, pending-approval expiry."""
+    """Every 10 s: per-mechanism expiry, reminders, deviation grace, pending-approval expiry."""
     last_actual_pub = 0
     while True:
         try:
+            now = now_utc()
+            expired = [k for k, w in active_windows().items()
+                       if w.get("end") and parse_iso(w["end"]) and now >= parse_iso(w["end"])]
+            if expired:
+                close_mechs(expired, "timer expired")
             with STATE_LOCK:
                 mode = STATE["mode"]
-                end = parse_iso(STATE.get("window_end"))
                 last_rem = parse_iso(STATE.get("last_reminder"))
-            now = now_utc()
-            if mode == "open" and end and now >= end:
-                lock_window("timer expired")
-            elif mode == "open":
+            if mode == "open":
                 rem_min = int(setting("reminder_minutes") or 0)
                 if rem_min and last_rem and now - last_rem >= timedelta(minutes=rem_min):
                     with STATE_LOCK:
                         STATE["last_reminder"] = iso(now)
                         save_state()
-                    notify("Agent Gate still OPEN",
-                           f"Open until {fmt_local(iso(end)) if end else 'you close it'}.",
-                           actions=[{"action": "AGENT_GATE_LOCK", "title": "Lock now"},
-                                    {"action": "AGENT_GATE_EXTEND_60", "title": "+1 hour"}],
+                    notify(T("title_still_open"), describe_windows(),
+                           actions=[{"action": "AGENT_GATE_LOCK", "title": T("btn_lock")},
+                                    {"action": "AGENT_GATE_EXTEND_60", "title": T("btn_plus_hour")}],
                            tag="agent_gate_window")
-            # pending approvals expire
             with STATE_LOCK:
                 tmo = timedelta(minutes=int(OPT.get("approval_timeout_minutes") or 3))
                 for pid, p in list(STATE["pending"].items()):
@@ -669,13 +812,14 @@ def timer_loop():
                         p["status"] = "expired"
                 if STATE["pending"]:
                     save_state()
-            # live state + deviation every 30 s
             if time.time() - last_actual_pub >= 30:
                 last_actual_pub = time.time()
                 actual = actual_states()
                 dev = compute_deviation(actual)
                 handle_deviation(dev)
                 publish_all(actual=actual, deviation=dev)
+            elif expired:
+                publish_all()
         except Exception as e:
             log(f"timer loop error: {e}")
         time.sleep(10)
@@ -698,13 +842,12 @@ def handle_deviation(dev):
         if not notified:
             STATE["deviation_notified"] = True
             save_state()
-    names = ", ".join(MECH_BY_KEY[k]["name"] for k in dev if k in MECH_BY_KEY)
+    names = ", ".join(mech_name(k) for k in dev)
     if not notified:
-        notify("Agent Gate: deviation",
-               f"{names} running while the gate says it should be off. "
-               f"Stopping in {int(grace.total_seconds() // 60)} min unless you open a window.",
-               actions=[{"action": "AGENT_GATE_OPEN_60", "title": "Open 1 hour"},
-                        {"action": "AGENT_GATE_LOCK", "title": "Stop it now"}],
+        notify(T("title_deviation"),
+               T("deviation_body", names=names, mins=int(grace.total_seconds() // 60)),
+               actions=[{"action": "AGENT_GATE_OPEN_60", "title": T("btn_open_hour")},
+                        {"action": "AGENT_GATE_LOCK", "title": T("btn_stop_now")}],
                tag="agent_gate_deviation")
     if now - since >= grace:
         log(f"deviation grace over, enforcing: {dev}")
@@ -721,16 +864,20 @@ def handle_deviation(dev):
 def enforce_on_start():
     with STATE_LOCK:
         mode = STATE["mode"]
-        end = parse_iso(STATE.get("window_end"))
     if mode == "opening":
         log("startup: previous open was interrupted -> locking")
         lock_window("restart during open")
-    elif mode == "open" and end and now_utc() >= end:
-        log("startup: window expired while down -> locking")
-        lock_window("expired while gate was down")
-    elif mode == "locked":
-        # Stop anything that should not be running while locked.
-        apply_addons(False)
+        return
+    now = now_utc()
+    expired = [k for k, w in active_windows().items()
+               if w.get("end") and parse_iso(w["end"]) and now >= parse_iso(w["end"])]
+    if expired:
+        log(f"startup: expired while down -> closing {expired}")
+        close_mechs(expired, "expired while gate was down")
+    with STATE_LOCK:
+        _recompute_mode()
+        save_state()
+    apply_addons()
 
 
 # --------------------------------------------------------------------------
@@ -740,11 +887,12 @@ MQTT_CLIENT = None
 BASE = "agent_gate"
 AVAIL_TOPIC = f"{BASE}/availability"
 DEVICE = {"identifiers": ["agent_gate"], "name": "Agent Gate",
-          "manufacturer": "Local add-on", "model": "Access gate", "sw_version": "0.1.0"}
+          "manufacturer": "ha-agent-gate", "model": "Access gate", "sw_version": VERSION}
 DURATION_BUTTONS = [("open_5", "Open 5 min", 5), ("open_15", "Open 15 min", 15),
                     ("open_30", "Open 30 min", 30), ("open_60", "Open 1 hour", 60),
                     ("open_180", "Open 3 hours", 180), ("open_unlimited", "Open until I close", 0),
-                    ("extend_60", "Add 1 hour", -60), ("lock_now", "Lock now", -1)]
+                    ("extend_60", "Add 1 hour", -60), ("lock_now", "Lock now", -1),
+                    ("backup_now", "Backup now", -2)]
 
 
 def mqtt_connect():
@@ -789,19 +937,30 @@ def _disc(component, obj_id, cfg):
                         json.dumps(full), qos=1, retain=True)
 
 
+def _undisc(component, obj_id):
+    MQTT_CLIENT.publish(f"homeassistant/{component}/agent_gate_{obj_id}/config", "", qos=1, retain=True)
+
+
 def publish_discovery():
     if not MQTT_CLIENT:
         return
+    # entities from 0.1.x that no longer exist
+    for comp, obj in (("number", "backup_min_interval_hours"), ("number", "backup_skip_minutes"),
+                      ("select", "backup_mode")):
+        _undisc(comp, obj)
     _disc("switch", "master", {"name": "Agent access", "icon": "mdi:shield-lock-open",
                                "state_topic": f"{BASE}/master/state", "command_topic": f"{BASE}/cmd/master"})
     for m in MECHANISMS:
-        _disc("switch", f"mech_{m['key']}", {"name": m["name"], "icon": "mdi:toggle-switch",
+        # ON = open now. Turning ON from a plain switch opens for default_window_minutes.
+        _disc("switch", f"mech_{m['key']}", {"name": m["name"], "icon": "mdi:door",
                                             "state_topic": f"{BASE}/mech/{m['key']}/state",
                                             "command_topic": f"{BASE}/cmd/mech/{m['key']}",
-                                            "json_attributes_topic": f"{BASE}/mech/{m['key']}/attributes",
-                                            "entity_category": "config"})
+                                            "json_attributes_topic": f"{BASE}/mech/{m['key']}/attributes"})
+        _disc("sensor", f"mech_{m['key']}_end", {"name": f"{m['name']} ends", "device_class": "timestamp",
+                                                 "state_topic": f"{BASE}/mech/{m['key']}/end",
+                                                 "entity_category": "diagnostic"})
     for obj, name, _ in DURATION_BUTTONS:
-        _disc("button", obj, {"name": name, "icon": "mdi:timer-outline",
+        _disc("button", obj, {"name": name, "icon": "mdi:backup-restore" if obj == "backup_now" else "mdi:timer-outline",
                               "command_topic": f"{BASE}/cmd/button", "payload_press": obj})
     _disc("sensor", "status", {"name": "Gate status", "icon": "mdi:shield-check",
                                "state_topic": f"{BASE}/status/state",
@@ -810,26 +969,20 @@ def publish_discovery():
                                    "state_topic": f"{BASE}/window_end/state"})
     _disc("sensor", "remaining", {"name": "Minutes remaining", "icon": "mdi:timer-sand",
                                   "unit_of_measurement": "min", "state_topic": f"{BASE}/remaining/state"})
+    _disc("sensor", "open_count", {"name": "Open mechanisms", "icon": "mdi:door-open",
+                                   "state_topic": f"{BASE}/open_count/state"})
     _disc("binary_sensor", "deviation", {"name": "Gate deviation", "device_class": "problem",
                                          "state_topic": f"{BASE}/deviation/state",
                                          "json_attributes_topic": f"{BASE}/deviation/attributes"})
-    _disc("select", "backup_mode", {"name": "Backup before opening", "icon": "mdi:backup-restore",
-                                    "options": ["always", "if_stale", "never"],
-                                    "state_topic": f"{BASE}/setting/backup_mode/state",
-                                    "command_topic": f"{BASE}/cmd/setting/backup_mode",
-                                    "entity_category": "config"})
-    _disc("number", "backup_min_interval_hours", {"name": "Backup max age (hours)", "icon": "mdi:clock-outline",
-                                                  "min": 1, "max": 168, "step": 1, "mode": "box",
-                                                  "unit_of_measurement": "h",
-                                                  "state_topic": f"{BASE}/setting/backup_min_interval_hours/state",
-                                                  "command_topic": f"{BASE}/cmd/setting/backup_min_interval_hours",
-                                                  "entity_category": "config"})
-    _disc("number", "backup_skip_minutes", {"name": "Skip backup for windows up to (min)", "icon": "mdi:timer-off-outline",
-                                            "min": 0, "max": 180, "step": 5, "mode": "slider",
-                                            "unit_of_measurement": "min",
-                                            "state_topic": f"{BASE}/setting/backup_skip_windows_up_to_minutes/state",
-                                            "command_topic": f"{BASE}/cmd/setting/backup_skip_windows_up_to_minutes",
-                                            "entity_category": "config"})
+    _disc("select", "backup_policy", {"name": "Backup before opening", "icon": "mdi:backup-restore",
+                                      "options": list(BACKUP_POLICIES),
+                                      "state_topic": f"{BASE}/setting/backup_policy/state",
+                                      "command_topic": f"{BASE}/cmd/setting/backup_policy",
+                                      "entity_category": "config"})
+    _disc("switch", "backup_skip_short", {"name": "No backup for short windows", "icon": "mdi:timer-off-outline",
+                                          "state_topic": f"{BASE}/setting/backup_skip_short/state",
+                                          "command_topic": f"{BASE}/cmd/setting/backup_skip_short",
+                                          "entity_category": "config"})
     _disc("number", "reminder_minutes", {"name": "Reminder every (min)", "icon": "mdi:bell-ring-outline",
                                          "min": 0, "max": 240, "step": 15, "mode": "slider",
                                          "unit_of_measurement": "min",
@@ -856,39 +1009,52 @@ def publish_all(actual=None, deviation=None):
         deviation = compute_deviation(actual) if actual else []
     with STATE_LOCK:
         st = json.loads(json.dumps(STATE))
-    open_ = st["mode"] == "open"
+    windows = st.get("windows", {})
+    open_ = st["mode"] == "open" and bool(windows)
     opening = st["mode"] == "opening"
-    end = parse_iso(st.get("window_end"))
-    remaining = max(0, int((end - now_utc()).total_seconds() // 60)) if (open_ and end) else (None if open_ else 0)
+    ends = [parse_iso(w["end"]) for w in windows.values() if w.get("end")]
+    unlimited = any(not w.get("end") for w in windows.values())
+    latest = max(ends) if ends else None
+    soonest = min(ends) if ends else None
     pub = MQTT_CLIENT.publish
     pub(f"{BASE}/master/state", "ON" if (open_ or opening) else "OFF", qos=1, retain=True)
     for m in MECHANISMS:
         a = actual.get(m["key"], {})
-        # Switch shows the mechanism's part in the window; attributes carry the live truth.
-        pub(f"{BASE}/mech/{m['key']}/state", "ON" if st["desired"].get(m["key"]) else "OFF", qos=1, retain=True)
+        w = windows.get(m["key"])
+        pub(f"{BASE}/mech/{m['key']}/state", "ON" if w else "OFF", qos=1, retain=True)
+        pub(f"{BASE}/mech/{m['key']}/end", (w or {}).get("end") or "None", qos=1, retain=True)
         pub(f"{BASE}/mech/{m['key']}/attributes",
             json.dumps({"running_now": a.get("running"), "addons": a.get("addons", {}),
-                        "in_window": bool(st["desired"].get(m["key"]))}), qos=1, retain=True)
-    status = "deviation" if deviation else ("open" if open_ else ("opening" if st["mode"] == "opening" else "locked"))
+                        "open": bool(w), "end": (w or {}).get("end"),
+                        "until_closed": bool(w) and not (w or {}).get("end"),
+                        "opened_at": (w or {}).get("opened_at"),
+                        "deviation": m["key"] in deviation}), qos=1, retain=True)
+    status = "deviation" if deviation else ("open" if open_ else ("opening" if opening else "locked"))
     pub(f"{BASE}/status/state", status, qos=1, retain=True)
     pub(f"{BASE}/status/attributes", json.dumps({
-        "window_id": st.get("window_id"), "opened_at": st.get("opened_at"),
+        "window_id": st.get("window_id"), "opened_at": st.get("opened_at") if open_ else None,
         "last_backup_at": st.get("last_backup_at"),
-        "window_end": st.get("window_end") or ("until closed" if open_ else None),
+        "window_end": (iso(latest) if latest and not unlimited else ("until closed" if open_ else None)),
+        "soonest_end": iso(soonest) if soonest else None,
+        "open_mechanisms": list(windows.keys()),
+        "open_names": [mech_name(k) for k in windows],
         "backup": st.get("backup"), "deviation": deviation,
         "actual": {k: v.get("running") for k, v in actual.items()},
-    }), qos=1, retain=True)
-    pub(f"{BASE}/window_end/state", st.get("window_end") or "None", qos=1, retain=True)
+        "language": LANG,
+    }, ensure_ascii=False), qos=1, retain=True)
+    pub(f"{BASE}/window_end/state", iso(latest) if (latest and not unlimited) else "None", qos=1, retain=True)
+    remaining = (max(0, int((soonest - now_utc()).total_seconds() // 60)) if soonest
+                 else (None if open_ else 0))
     pub(f"{BASE}/remaining/state", "unknown" if remaining is None else str(remaining), qos=1, retain=True)
+    pub(f"{BASE}/open_count/state", str(len(windows)), qos=1, retain=True)
     pub(f"{BASE}/deviation/state", "ON" if deviation else "OFF", qos=1, retain=True)
     pub(f"{BASE}/deviation/attributes", json.dumps({"mechanisms": deviation,
-                                                     "since": st.get("deviation_since")}), qos=1, retain=True)
-    for key in SETTINGS_KEYS:
-        val = setting(key)
-        if val is None:
-            val = {"backup_mode": "always", "backup_min_interval_hours": 6,
-                   "backup_skip_windows_up_to_minutes": 0, "reminder_minutes": 60}[key]
-        pub(f"{BASE}/setting/{key}/state", str(val), qos=1, retain=True)
+                                                     "names": [mech_name(k) for k in deviation],
+                                                     "since": st.get("deviation_since")}, ensure_ascii=False),
+        qos=1, retain=True)
+    pub(f"{BASE}/setting/backup_policy/state", backup_policy(), qos=1, retain=True)
+    pub(f"{BASE}/setting/backup_skip_short/state", "ON" if backup_skip_short() else "OFF", qos=1, retain=True)
+    pub(f"{BASE}/setting/reminder_minutes/state", str(setting("reminder_minutes") or 0), qos=1, retain=True)
     pend = {k: v for k, v in st.get("pending", {}).items() if v.get("status") == "pending"}
     pub(f"{BASE}/pending/state", str(len(pend)), qos=1, retain=True)
     pub(f"{BASE}/pending/attributes", json.dumps({
@@ -896,27 +1062,61 @@ def publish_all(actual=None, deviation=None):
     }, ensure_ascii=False), qos=1, retain=True)
 
 
+def _bg(fn, *args):
+    threading.Thread(target=fn, args=args, daemon=True).start()
+
+
+def _parse_cmd(payload):
+    """'{"mech":"ssh","minutes":60}' or 'ssh' or 'ssh,60'. mech may be 'all'."""
+    try:
+        d = json.loads(payload)
+        if isinstance(d, dict):
+            return d.get("mech") or d.get("mechanism") or "all", d.get("minutes")
+    except Exception:
+        pass
+    parts = [p.strip() for p in payload.split(",")]
+    return parts[0] or "all", (parts[1] if len(parts) > 1 else None)
+
+
+def _mech_keys(spec):
+    if spec in ("all", "*", ""):
+        return [m["key"] for m in MECHANISMS if m["default_on"]]
+    if spec == "open":
+        return list(active_windows().keys())
+    return [k for k in str(spec).split("+") if k in MECH_BY_KEY]
+
+
 def on_mqtt_message(client, userdata, msg):
     try:
         topic = msg.topic
         payload = msg.payload.decode("utf-8", "replace").strip()
         log(f"mqtt {topic} = {payload}")
+        default_min = int(OPT.get("default_window_minutes") or 30)
         if topic == f"{BASE}/cmd/master":
             if payload.upper() == "ON":
-                threading.Thread(target=open_window, args=(int(OPT.get("default_window_minutes") or 30),),
-                                 daemon=True).start()
+                _bg(open_window, default_min)
             else:
-                threading.Thread(target=lock_window, args=("dashboard",), daemon=True).start()
+                _bg(lock_window, "dashboard")
         elif topic.startswith(f"{BASE}/cmd/mech/"):
             key = topic.rsplit("/", 1)[1]
             if key in MECH_BY_KEY:
-                with STATE_LOCK:
-                    STATE["desired"][key] = payload.upper() == "ON"
-                    open_ = STATE["mode"] == "open"
-                    save_state()
-                if open_:
-                    threading.Thread(target=apply_addons, args=(True,), daemon=True).start()
-                publish_all()
+                if payload.upper() == "ON":
+                    _bg(open_mechs, [key], default_min)
+                else:
+                    _bg(close_mechs, [key], "dashboard")
+        elif topic == f"{BASE}/cmd/open":
+            spec, minutes = _parse_cmd(payload)
+            minutes = int(minutes) if minutes not in (None, "") else default_min
+            _bg(open_mechs, _mech_keys(spec), minutes)
+        elif topic == f"{BASE}/cmd/close":
+            spec, _ = _parse_cmd(payload)
+            keys = list(MECH_BY_KEY) if spec in ("all", "*", "") else _mech_keys(spec)
+            _bg(close_mechs, keys, "dashboard")
+        elif topic == f"{BASE}/cmd/extend":
+            spec, minutes = _parse_cmd(payload)
+            minutes = int(minutes) if minutes not in (None, "") else 60
+            keys = list(active_windows().keys()) if spec in ("all", "*", "", "open") else _mech_keys(spec)
+            extend_mechs(keys, minutes)
         elif topic.startswith(f"{BASE}/cmd/setting/"):
             key = topic.rsplit("/", 1)[1]
             set_setting(key, payload)
@@ -924,21 +1124,35 @@ def on_mqtt_message(client, userdata, msg):
         elif topic == f"{BASE}/cmd/button":
             handle_button(payload)
         elif topic == f"{BASE}/action":
-            # forwarded mobile notification actions (see ha/agent_gate_package.yaml)
             handle_action(payload)
     except Exception as e:
         log(f"mqtt message error: {e}")
+
+
+def backup_now():
+    slug = create_full_backup(f"agent_gate_manual_{datetime.now().strftime('%Y%m%d_%H%M')}")
+    if slug:
+        with STATE_LOCK:
+            STATE["last_backup_at"] = iso(now_utc())
+            STATE["backup"] = slug
+            save_state()
+        notify(T("title"), T("backup_done"), tag="agent_gate_backup")
+    else:
+        notify(T("title"), T("backup_failed_plain"), tag="agent_gate_backup")
+    publish_all()
 
 
 def handle_button(obj):
     for key, _, minutes in DURATION_BUTTONS:
         if key == obj:
             if minutes == -1:
-                threading.Thread(target=lock_window, args=("dashboard",), daemon=True).start()
+                _bg(lock_window, "dashboard")
+            elif minutes == -2:
+                _bg(backup_now)
             elif minutes < 0:
                 extend_window(-minutes)
             else:
-                threading.Thread(target=open_window, args=(minutes,), daemon=True).start()
+                _bg(open_window, minutes)
             return
     log(f"unknown button {obj}")
 
@@ -953,12 +1167,11 @@ def handle_action(payload):
         action = payload
     action = action.strip()
     if action == "AGENT_GATE_LOCK":
-        threading.Thread(target=lock_window, args=("phone",), daemon=True).start()
+        _bg(lock_window, "phone")
     elif action.startswith("AGENT_GATE_EXTEND_"):
         extend_window(int(action.rsplit("_", 1)[1]))
     elif action.startswith("AGENT_GATE_OPEN_"):
-        threading.Thread(target=open_window, args=(int(action.rsplit("_", 1)[1]), "phone"),
-                         daemon=True).start()
+        _bg(open_window, int(action.rsplit("_", 1)[1]), "phone")
     elif action.startswith("AGENT_GATE_APPROVE_") or action.startswith("AGENT_GATE_REJECT_"):
         pid = action.rsplit("_", 1)[1]
         verdict = "approved" if "APPROVE" in action else "rejected"
@@ -969,6 +1182,136 @@ def handle_action(payload):
                 save_state()
         log(f"approval {pid}: {verdict}")
         publish_all()
+
+
+# --------------------------------------------------------------------------
+# 5b. ready-made dashboard (created once, standard cards only)
+# --------------------------------------------------------------------------
+DASHBOARD_URL = "agent-gate"
+
+
+def _ws_call(commands):
+    """Run a few HA websocket commands through the Supervisor proxy. Returns list of results."""
+    if websocket is None:
+        raise RuntimeError("websocket-client missing")
+    u = urlsplit(SUPERVISOR)
+    ws = websocket.create_connection(f"ws://{u.hostname}:{u.port or 80}/core/websocket", timeout=20)
+    try:
+        ws.recv()  # auth_required
+        ws.send(json.dumps({"type": "auth", "access_token": SUPERVISOR_TOKEN}))
+        if json.loads(ws.recv()).get("type") != "auth_ok":
+            raise RuntimeError("websocket auth failed")
+        out = []
+        for i, cmd in enumerate(commands, start=1):
+            cmd = dict(cmd, id=i)
+            ws.send(json.dumps(cmd))
+            while True:
+                msg = json.loads(ws.recv())
+                if msg.get("id") == i and msg.get("type") == "result":
+                    out.append(msg)
+                    break
+        return out
+    finally:
+        ws.close()
+
+
+def _mqtt_btn(name, icon, topic, payload, color=None):
+    c = {"type": "button", "name": name, "icon": icon, "show_state": False,
+         "tap_action": {"action": "perform-action", "perform_action": "mqtt.publish",
+                        "data": {"topic": f"{BASE}/{topic}", "payload": payload}}}
+    if color:
+        c["icon_color"] = color
+    return c
+
+
+def dashboard_config():
+    S = "sensor.agent_gate_status"
+    status_md = (
+        "{% set s = states('" + S + "') %}"
+        "{% if s == 'locked' %}## 🟢 Locked\nNo agent access right now."
+        "{% elif s == 'opening' %}## 🟠 Opening, backup running..."
+        "{% elif s == 'deviation' %}## 🔴 Deviation\n{{ state_attr('binary_sensor.agent_gate_deviation','names') | join(', ') }} "
+        "is running without a window. The gate will stop it in a few minutes."
+        "{% else %}## 🟠 Open: {{ state_attr('" + S + "','open_names') | join(', ') }}\n"
+        "{% set e = state_attr('" + S + "','soonest_end') %}"
+        "{% if e %}Next close in {{ ((as_timestamp(e) - now().timestamp()) / 60) | int }} min"
+        "{% else %}Open until you close it{% endif %}{% endif %}"
+        "{% set b = state_attr('" + S + "','last_backup_at') %}\n\n"
+        "{% if b %}Last backup: {{ as_timestamp(b) | timestamp_custom('%d/%m %H:%M') }}{% endif %}"
+        "{% set p = states('sensor.agent_gate_pending') | int(0) %}{% if p > 0 %} · **{{ p }} command(s) waiting for your approval**{% endif %}"
+    )
+    open_all = [
+        {"type": "horizontal-stack", "cards": [
+            _mqtt_btn("15 min", "mdi:timer-outline", "cmd/open", '{"mech":"all","minutes":15}'),
+            _mqtt_btn("1 hour", "mdi:timer-outline", "cmd/open", '{"mech":"all","minutes":60}')]},
+        {"type": "horizontal-stack", "cards": [
+            _mqtt_btn("3 hours", "mdi:timer-sand", "cmd/open", '{"mech":"all","minutes":180}'),
+            _mqtt_btn("Until I close", "mdi:timer-off-outline", "cmd/open", '{"mech":"all","minutes":0}')]},
+        {"type": "horizontal-stack", "cards": [
+            _mqtt_btn("+1 hour", "mdi:timer-plus-outline", "cmd/extend", '{"mech":"open","minutes":60}'),
+            _mqtt_btn("Lock now", "mdi:lock", "cmd/close", '{"mech":"all"}', "red")]},
+    ]
+    mech_cards = []
+    for m in MECHANISMS:
+        k = m["key"]
+        sw = f"switch.agent_gate_mech_{k}"
+        mech_cards.append({"type": "tile", "entity": sw, "name": m["name"],
+                           "state_content": ["state", "end"], "tap_action": {"action": "more-info"},
+                           "icon_tap_action": {"action": "toggle"}, "color": "amber"})
+        mech_cards.append({"type": "horizontal-stack", "cards": [
+            _mqtt_btn("15 min", "mdi:timer-outline", "cmd/open", json.dumps({"mech": k, "minutes": 15})),
+            _mqtt_btn("1 hour", "mdi:timer-outline", "cmd/open", json.dumps({"mech": k, "minutes": 60})),
+            _mqtt_btn("3 hours", "mdi:timer-sand", "cmd/open", json.dumps({"mech": k, "minutes": 180})),
+            _mqtt_btn("Close", "mdi:close-circle-outline", "cmd/close", json.dumps({"mech": k}), "red")]})
+    settings = [
+        {"type": "entities", "title": "Settings", "entities": [
+            {"entity": "select.agent_gate_backup_policy", "name": "Backup before opening"},
+            {"entity": "switch.agent_gate_backup_skip_short", "name": f"No backup for windows up to {SHORT_WINDOW_MINUTES} min"},
+            {"entity": "number.agent_gate_reminder_minutes", "name": "Remind me every (min)"},
+            {"entity": "button.agent_gate_backup_now", "name": "Backup now"},
+        ]},
+        {"type": "markdown", "content": "**always**: full backup before every open. **every_6h** / **daily**: "
+                                        "only when the newest full backup (any source) is older than that. "
+                                        "**never**: no backup. The agent cannot change these settings."},
+        {"type": "horizontal-stack", "cards": [
+            {"type": "button", "name": "Add-on settings", "icon": "mdi:cog", "show_state": False,
+             "tap_action": {"action": "navigate", "navigation_path": f"/hassio/addon/{SELF_SLUG}/config"}},
+            {"type": "button", "name": "Entities", "icon": "mdi:format-list-bulleted", "show_state": False,
+             "tap_action": {"action": "navigate", "navigation_path": "/config/entities?search=agent_gate"}},
+            {"type": "button", "name": "Log", "icon": "mdi:text-box-search-outline", "show_state": False,
+             "tap_action": {"action": "navigate", "navigation_path": f"/hassio/addon/{SELF_SLUG}/logs"}}]},
+    ]
+    pending = {"type": "conditional",
+               "conditions": [{"condition": "numeric_state", "entity": "sensor.agent_gate_pending", "above": 0}],
+               "card": {"type": "markdown", "content":
+                        "**Commands waiting for your approval** (answer the phone notification)\n"
+                        "{% for i in state_attr('sensor.agent_gate_pending','items') or [] %}- `{{ i.id }}` {{ i.command }}\n{% endfor %}"}}
+    return {"views": [{"title": "Agent Gate", "path": "gate", "icon": "mdi:shield-lock", "type": "sections",
+                       "max_columns": 2, "sections": [
+                           {"type": "grid", "cards": [{"type": "markdown", "content": status_md}] + open_all + [pending]},
+                           {"type": "grid", "title": "Mechanisms", "cards": mech_cards},
+                           {"type": "grid", "title": "Settings", "cards": settings},
+                       ]}]}
+
+
+def ensure_dashboard():
+    """Create the 'Agent Gate' dashboard once. Never overwrites a dashboard that exists."""
+    if not OPT.get("create_dashboard", True):
+        return
+    try:
+        res = _ws_call([{"type": "lovelace/dashboards/list"}])
+        existing = [d.get("url_path") for d in (res[0].get("result") or [])]
+        if DASHBOARD_URL in existing:
+            return
+        res = _ws_call([
+            {"type": "lovelace/dashboards/create", "url_path": DASHBOARD_URL, "title": "Agent Gate",
+             "icon": "mdi:shield-lock", "show_in_sidebar": True, "require_admin": True, "mode": "storage"},
+            {"type": "lovelace/config/save", "url_path": DASHBOARD_URL, "config": dashboard_config()},
+        ])
+        ok = all(r.get("success") for r in res)
+        log(f"dashboard '{DASHBOARD_URL}' created: {ok}" + ("" if ok else f" {res}"))
+    except Exception as e:
+        log(f"dashboard not created ({e}); you can build one from the entities instead")
 
 
 # --------------------------------------------------------------------------
@@ -1224,12 +1567,13 @@ def gate_status_text():
     with STATE_LOCK:
         st = json.loads(json.dumps(STATE))
     lines = [f"mode: {st['mode']}"]
-    if st["mode"] == "open":
-        lines.append(f"window ends: {st.get('window_end') or 'when the user closes it'}")
     for m in MECHANISMS:
         a = actual.get(m["key"], {})
-        lines.append(f"{m['key']}: in window={'yes' if st['desired'].get(m['key']) else 'no'}, "
-                     f"running now={a.get('running')}")
+        w = st.get("windows", {}).get(m["key"])
+        if w:
+            lines.append(f"{m['key']}: OPEN until {w.get('end') or 'the user closes it'}, running now={a.get('running')}")
+        else:
+            lines.append(f"{m['key']}: closed, running now={a.get('running')}")
     pend = [f"{k}: {v['command'][:100]} ({v['status']})" for k, v in st.get("pending", {}).items()]
     lines.append("pending approvals: " + (", ".join(pend) if pend else "none"))
     lines.append("Only the user can open, extend or lock the gate (dashboard or phone).")
@@ -1267,9 +1611,7 @@ def run_gate_tool(name, args):
         return tool_text(gate_status_text())
     if name != "gate_run_command":
         return tool_text(f"unknown gate tool {name}", True)
-    with STATE_LOCK:
-        open_ = STATE["mode"] == "open" and STATE["desired"].get("commands", False)
-    if not open_:
+    if not is_active("commands"):
         return tool_text("DENIED: Agent Gate is locked (or the 'commands' mechanism is off). "
                          "Ask the user to open the gate from the dashboard, then retry.", True)
     approval_id = (args.get("approval_id") or "").strip()
@@ -1306,9 +1648,9 @@ def run_gate_tool(name, args):
             STATE["pending"][pid] = {"command": command, "cwd": cwd, "timeout": timeout,
                                      "created": iso(now_utc()), "status": "pending"}
             save_state()
-        notify("Agent Gate: approve command?", f"[{pid}] {command[:400]}",
-               actions=[{"action": f"AGENT_GATE_APPROVE_{pid}", "title": "Approve"},
-                        {"action": f"AGENT_GATE_REJECT_{pid}", "title": "Reject"}],
+        notify(T("approve_title"), f"[{pid}] {command[:400]}",
+               actions=[{"action": f"AGENT_GATE_APPROVE_{pid}", "title": T("btn_approve")},
+                        {"action": f"AGENT_GATE_REJECT_{pid}", "title": T("btn_reject")}],
                tag=f"agent_gate_approval_{pid}")
         publish_all()
         return tool_text(f"HELD for user approval (destructive pattern). approval_id={pid}. "
@@ -1340,6 +1682,7 @@ def main():
             log(f"MQTT unavailable: {e} (dashboard control disabled)")
     if SUPERVISOR_TOKEN:
         enforce_on_start()
+        threading.Thread(target=ensure_dashboard, daemon=True).start()
     publish_all(actual=actual_states() if SUPERVISOR_TOKEN else {})
     threading.Thread(target=timer_loop, daemon=True).start()
     log("=" * 60)

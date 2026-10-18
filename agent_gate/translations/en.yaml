@@ -1,0 +1,46 @@
+configuration:
+  upstream_mcp_url:
+    name: Upstream MCP server URL
+    description: The private URL of your ha-mcp server (from the ha-mcp add-on log). The gate sits in front of it.
+  notify_service:
+    name: Notification service
+    description: The notify service for your phone, e.g. mobile_app_my_phone. "notify" sends to all.
+  reminder_minutes:
+    name: Reminder every (minutes)
+    description: While something is open, remind you this often. 0 disables. Also adjustable on the dashboard.
+  deviation_grace_minutes:
+    name: Deviation grace (minutes)
+    description: An add-on running without an open window is stopped after this many minutes.
+  approval_timeout_minutes:
+    name: Approval timeout (minutes)
+    description: A command waiting for your approval expires after this.
+  backup_policy:
+    name: Backup before opening
+    description: "always: full backup before every open. every_6h / daily: only when the newest full backup (any source) is older than that. never: no backup. Also on the dashboard."
+  backup_skip_short:
+    name: No backup for short windows
+    description: Skip the backup for windows of 15 minutes or less.
+  language:
+    name: Language
+    description: Language of phone notifications (en or he).
+  default_window_minutes:
+    name: Default window (minutes)
+    description: Used when a mechanism switch or the master switch is turned on without choosing a duration.
+  create_dashboard:
+    name: Create the Agent Gate dashboard
+    description: On start, create a ready-made "Agent Gate" dashboard in the sidebar if one does not exist yet.
+  read_tool_patterns:
+    name: Read-only tool patterns
+    description: MCP tools matching these patterns are always allowed (they only read).
+  protected_patterns:
+    name: Protected patterns
+    description: A tool call or command mentioning any of these is refused, even in an open window. Keeps the agent away from the gate itself.
+  protected_exempt_tools:
+    name: Tools exempt from protection
+    description: Write tools that may mention the gate without acting on it (dashboards, labels).
+  destructive_patterns:
+    name: Destructive command patterns
+    description: Shell commands matching these regular expressions need your approval on the phone before they run.
+  mechanisms:
+    name: Mechanisms
+    description: Each entry is an access path the gate controls (key, display name, the add-ons it starts and stops, and whether a full window includes it).

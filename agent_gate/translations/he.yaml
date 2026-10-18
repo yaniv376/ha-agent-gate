@@ -1,0 +1,46 @@
+configuration:
+  upstream_mcp_url:
+    name: כתובת שרת ה-MCP
+    description: הכתובת הפרטית של שרת ha-mcp (מהלוג של התוסף ha-mcp). השער יושב לפניו.
+  notify_service:
+    name: שירות התראות
+    description: שירות ה-notify של הטלפון, למשל mobile_app_my_phone. "notify" שולח לכולם.
+  reminder_minutes:
+    name: תזכורת כל (דקות)
+    description: כל עוד משהו פתוח, תזכורת בתדירות הזאת. 0 מבטל. ניתן לשינוי גם מהדשבורד.
+  deviation_grace_minutes:
+    name: חסד לסטייה (דקות)
+    description: תוסף שרץ בלי חלון פתוח נעצר אחרי מספר הדקות הזה.
+  approval_timeout_minutes:
+    name: פג תוקף אישור (דקות)
+    description: פקודה שממתינה לאישור שלך פגה אחרי זמן זה.
+  backup_policy:
+    name: גיבוי לפני פתיחה
+    description: "always: גיבוי מלא לפני כל פתיחה. every_6h / daily: רק אם הגיבוי המלא האחרון (מכל מקור) ישן יותר. never: בלי גיבוי. ניתן לשינוי גם מהדשבורד."
+  backup_skip_short:
+    name: בלי גיבוי לחלונות קצרים
+    description: דילוג על הגיבוי לחלונות של עד 15 דקות.
+  language:
+    name: שפה
+    description: שפת ההתראות לטלפון (en או he).
+  default_window_minutes:
+    name: חלון ברירת מחדל (דקות)
+    description: משמש כשמדליקים מתג מנגנון או את המתג הראשי בלי לבחור משך.
+  create_dashboard:
+    name: יצירת דשבורד Agent Gate
+    description: בהפעלה, יצירת דשבורד מוכן "Agent Gate" בסרגל הצד אם עדיין לא קיים.
+  read_tool_patterns:
+    name: תבניות כלי קריאה
+    description: כלי MCP שתואמים לתבניות האלה מותרים תמיד (הם רק קוראים).
+  protected_patterns:
+    name: תבניות מוגנות
+    description: קריאת כלי או פקודה שמזכירה אחת מאלה נדחית, גם בחלון פתוח. מרחיק את הסוכן מהשער עצמו.
+  protected_exempt_tools:
+    name: כלים פטורים מהגנה
+    description: כלי כתיבה שיכולים להזכיר את השער בלי לפעול עליו (דשבורדים, תוויות).
+  destructive_patterns:
+    name: תבניות פקודות הרסניות
+    description: פקודות מעטפת שתואמות לביטויים הרגולריים האלה דורשות אישור שלך בטלפון לפני שהן רצות.
+  mechanisms:
+    name: מנגנונים
+    description: כל רשומה היא נתיב גישה שהשער שולט בו (מפתח, שם לתצוגה, התוספים שהוא מדליק ומכבה, והאם חלון מלא כולל אותו).

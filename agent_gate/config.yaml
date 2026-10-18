@@ -1,6 +1,6 @@
 name: "Agent Gate"
 description: "On/off access gate for AI agents: MCP write lock, shell command tool, controlled add-ons, timed windows"
-version: "0.1.7"
+version: "0.2.0"
 slug: "agent_gate"
 url: "https://github.com/yaniv376/ha-agent-gate"
 arch:
@@ -30,10 +30,11 @@ options:
   reminder_minutes: 60
   deviation_grace_minutes: 5
   approval_timeout_minutes: 3
-  backup_mode: "always"
-  backup_min_interval_hours: 6
-  backup_skip_windows_up_to_minutes: 0
+  backup_policy: "always"
+  backup_skip_short: false
+  language: "en"
   default_window_minutes: 30
+  create_dashboard: true
   read_tool_patterns:
     - "ha_get_*"
     - "ha_list_*"
@@ -92,10 +93,11 @@ schema:
   reminder_minutes: int(0,1440)?
   deviation_grace_minutes: int(1,60)?
   approval_timeout_minutes: int(1,30)?
-  backup_mode: list(always|if_stale|never)?
-  backup_min_interval_hours: int(1,168)?
-  backup_skip_windows_up_to_minutes: int(0,1440)?
+  backup_policy: list(always|every_6h|daily|never)?
+  backup_skip_short: bool?
+  language: list(en|he)?
   default_window_minutes: int(1,1440)?
+  create_dashboard: bool?
   read_tool_patterns:
     - str
   protected_patterns:

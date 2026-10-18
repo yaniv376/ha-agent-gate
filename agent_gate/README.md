@@ -13,26 +13,38 @@ Claude  →  Webhook Proxy  →  Agent Gate (:9584)  →  ha-mcp (:9583)
                                       (SSH, Claude Terminal, VS Code, File editor, AppDaemon ...)
 ```
 
-Only the dashboard (MQTT switch / buttons) or the phone notification buttons
-open, extend or lock the gate. Any tool call whose arguments mention the
-gate (`protected_patterns`) is refused even while open, so the agent cannot
-open it for itself.
+Only the dashboard (MQTT entities) or the phone notification buttons open,
+extend or close anything. Any tool call whose arguments mention the gate
+(`protected_patterns`) is refused even while open, so the agent cannot open
+it for itself.
 
-## What happens on open
+## Mechanisms and windows
 
-1. Full Supervisor backup according to the backup policy (below); if a backup is
-   required and fails, the window is not opened.
-2. Add-ons of every mechanism whose switch is ON are started.
-3. The MCP write path and `gate_run_command` are enabled.
-4. A phone notification with "Lock now" and "+1 hour" buttons; repeated every
-   `reminder_minutes` while open.
+A *mechanism* is one access path: `ha_write` (MCP write tools), `commands`
+(`gate_run_command`), and one entry per add-on group you list (SSH, Claude
+Terminal, file editors, AppDaemon ...). **Each mechanism has its own window**
+with its own end time: SSH can be open for an hour while HA writes are open
+for three. The big "Open 15 min / 1 hour / 3 hours / until I close" buttons
+open every mechanism marked `default_on`; a single mechanism is opened from
+its own buttons (or its switch, which uses `default_window_minutes`).
 
-## What happens on lock (button, timer, phone, or gate restart after expiry)
+## What happens on the first open
 
-1. Add-ons are stopped, writes refused again.
-2. Phone summary: commands that ran in the window and files changed under
-   `/addons`, `/homeassistant`, `/share` since the window opened.
-3. Window history appended to `/data/windows.jsonl`.
+1. Full Supervisor backup according to the backup policy (below); if a backup
+   is required and fails, nothing is opened.
+2. The add-ons of the opened mechanisms are started (in parallel).
+3. The MCP write path and/or `gate_run_command` are enabled.
+4. A phone notification listing what is open until when, with "Lock now" and
+   "+1 hour" buttons; repeated every `reminder_minutes` while anything is open.
+
+## What happens on close
+
+A mechanism closes from its button, its timer, or "Lock now" (closes all).
+Its add-ons are stopped. When a timer closes it you get a one-line
+notification. When the **last** open mechanism closes you get the session
+summary: commands that ran and files changed under `/addons`,
+`/homeassistant`, `/share` since the first open. History goes to
+`/data/windows.jsonl`.
 
 ## Destructive commands
 
@@ -44,8 +56,7 @@ call again with it after you approve. Unanswered approvals expire after
 ## Deviation
 
 Every 30 s the gate reads the real add-on states from the Supervisor. An
-editing add-on running while the gate is locked (or while its mechanism is
-off) is a deviation: `binary_sensor.agent_gate_deviation` turns on, you get a
+editing add-on running while its mechanism is closed is a deviation: `binary_sensor.agent_gate_deviation` turns on, you get a
 notification with "Open 1 hour / Stop it now", and after
 `deviation_grace_minutes` the gate stops it.
 
@@ -68,10 +79,26 @@ the gate; if a deviation lasts 10 minutes, HA stops them too.
    Restart the proxy.
 6. Copy `ha/agent_gate_package.yaml` to `/homeassistant/packages/` (or
    recreate its automations in the UI) and restart HA.
-7. The entities appear under the "Agent Gate" MQTT device:
-   `switch.agent_gate_master`, `switch.agent_gate_mech_*`, `button.agent_gate_open_*`,
-   `sensor.agent_gate_status`, `sensor.agent_gate_remaining`,
-   `binary_sensor.agent_gate_deviation`, `sensor.agent_gate_pending`.
+7. On first start the add-on creates an **"Agent Gate" dashboard** in the
+   sidebar (standard cards, admin only). Edit it freely; the add-on never
+   overwrites an existing dashboard. Set `create_dashboard: false` to skip it.
+   The entities appear under the "Agent Gate" MQTT device:
+   `switch.agent_gate_master`, `switch.agent_gate_mech_*` (ON = open now),
+   `sensor.agent_gate_mech_*_end`, `button.agent_gate_open_*`,
+   `button.agent_gate_backup_now`, `sensor.agent_gate_status` (attributes:
+   `open_mechanisms`, `open_names`, `soonest_end`, `last_backup_at`),
+   `sensor.agent_gate_remaining`, `sensor.agent_gate_open_count`,
+   `binary_sensor.agent_gate_deviation`, `sensor.agent_gate_pending`,
+   `select.agent_gate_backup_policy`, `switch.agent_gate_backup_skip_short`,
+   `number.agent_gate_reminder_minutes`.
+
+### MQTT commands (for your own cards)
+
+Publish to `agent_gate/cmd/open`, `agent_gate/cmd/close` or
+`agent_gate/cmd/extend` with a JSON payload: `{"mech": "ssh", "minutes": 60}`.
+`mech` is a mechanism key, `all` (every `default_on` mechanism), `open`
+(everything currently open, for extend) or keys joined with `+`.
+`minutes: 0` means until closed.
 
 Note: the first start locks the system, i.e. it stops every add-on listed
 under `mechanisms`.
@@ -81,15 +108,15 @@ under `mechanisms`.
 - `upstream_mcp_url` (required): ha-mcp private URL.
 - `notify_service`: `notify.<this>` for phone notifications (default `notify`).
 - `reminder_minutes`: 0 disables reminders.
-- The backup policy and the reminder interval are also entities
-  (`select.agent_gate_backup_mode`, `number.agent_gate_backup_min_interval_hours`,
-  `number.agent_gate_backup_skip_minutes`, `number.agent_gate_reminder_minutes`),
-  so they can live on the dashboard; a value set there overrides the option.
-- Backup policy: `backup_mode` is `always` (a full backup before every open),
-  `if_stale` (only when the newest full backup the Supervisor knows about,
-  from any source, is older than `backup_min_interval_hours`), or `never`.
-  `backup_skip_windows_up_to_minutes` skips the backup for short windows
-  (e.g. 15 means 5 and 15 minute windows open immediately; 0 disables).
+- `backup_policy`: `always` (full backup before every first open), `every_6h`
+  or `daily` (only when the newest full backup the Supervisor knows about,
+  from any source, is older than that), or `never`. `backup_skip_short`
+  skips the backup for windows of 15 minutes or less. Both are also entities
+  (`select.agent_gate_backup_policy`, `switch.agent_gate_backup_skip_short`,
+  and `number.agent_gate_reminder_minutes`); a value set on the dashboard
+  overrides the option.
+- `language`: `en` or `he` for phone notifications.
+- `create_dashboard`: create the ready-made dashboard on start (default true).
 - `deviation_grace_minutes`, `approval_timeout_minutes`,
   `default_window_minutes` (used by the master switch; the buttons choose
   explicit durations, "Open until I close" has no end).
@@ -103,6 +130,6 @@ under `mechanisms`.
 
 ## Files in /data
 
-`state.json` (mode, window, desired mechanisms, pending approvals),
+`state.json` (per-mechanism windows, session, pending approvals),
 `endpoint_token`, `audit.jsonl` (every tool decision), `commands.jsonl`,
 `windows.jsonl`.
