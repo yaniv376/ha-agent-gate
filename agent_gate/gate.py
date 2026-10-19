@@ -56,7 +56,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.3.6"
+VERSION = "0.3.7"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -293,6 +293,7 @@ STRINGS = {
         "btn_lock": "Lock now", "btn_plus_hour": "+1 hour", "btn_open_hour": "Open 1 hour",
         "btn_stop_now": "Stop it now",
         "approve_title": "Agent Gate: approve command?", "btn_approve": "Approve", "btn_reject": "Reject",
+        "approve_hint": "Approve or reject with the buttons on the phone notification or on the Agent Gate dashboard.",
     },
     "he": {
         "title": "שער הסוכן", "title_open": "שער הסוכן פתוח", "title_locked": "שער הסוכן נעול",
@@ -307,6 +308,7 @@ STRINGS = {
         "btn_lock": "נעל עכשיו", "btn_plus_hour": "+ שעה", "btn_open_hour": "פתח לשעה",
         "btn_stop_now": "עצור עכשיו",
         "approve_title": "שער הסוכן: לאשר פקודה?", "btn_approve": "אשר", "btn_reject": "דחה",
+        "approve_hint": "אישור או דחייה בכפתורים שבהתראת הטלפון או בדשבורד של השער.",
     },
 }
 
@@ -505,9 +507,10 @@ def notify(title, message, actions=None, tag=None):
     if not payload["data"]:
         payload.pop("data")
     ok = ha_call_service("notify", svc, payload)
-    # Persistent notification as a fallback that is always visible in HA.
+    # Persistent notification as a fallback that is always visible in HA. It has no
+    # buttons: the Approve/Reject buttons are on the phone push and on the dashboard.
     ha_call_service("persistent_notification", "create",
-                    {"title": title, "message": message,
+                    {"title": title, "message": message + ("\n\n" + T("approve_hint") if actions else ""),
                      "notification_id": tag or f"agent_gate_{uuid.uuid4().hex[:8]}"})
     return ok
 
@@ -1228,11 +1231,20 @@ def handle_action(payload):
         pid = action.rsplit("_", 1)[1]
         verdict = "approved" if "APPROVE" in action else "rejected"
         with STATE_LOCK:
-            p = STATE["pending"].get(pid)
-            if p and p.get("status") == "pending":
-                p["status"] = verdict
-                save_state()
-        log(f"approval {pid}: {verdict}")
+            pend = STATE["pending"]
+            if pid in ("LATEST", "ALL"):
+                # Dashboard buttons: no id at hand, act on the newest (or every) pending command.
+                ids = sorted((k for k, v in pend.items() if v.get("status") == "pending"),
+                             key=lambda k: pend[k].get("created", ""))
+                ids = ids[-1:] if pid == "LATEST" else ids
+            else:
+                ids = [pid]
+            for k in ids:
+                p = pend.get(k)
+                if p and p.get("status") == "pending":
+                    p["status"] = verdict
+            save_state()
+        log(f"approval {ids}: {verdict}")
         publish_all()
 
 
@@ -1327,17 +1339,21 @@ def dashboard_config():
                                         "**never**: no backup. The agent cannot change these settings."},
         {"type": "horizontal-stack", "cards": [
             {"type": "button", "name": "Add-on settings", "icon": "mdi:cog", "show_state": False,
-             "tap_action": {"action": "navigate", "navigation_path": f"/hassio/addon/{SELF_SLUG}/config"}},
+             "tap_action": {"action": "navigate", "navigation_path": f"/config/app/{SELF_SLUG}/config"}},
             {"type": "button", "name": "Entities", "icon": "mdi:format-list-bulleted", "show_state": False,
              "tap_action": {"action": "navigate", "navigation_path": "/config/entities?search=agent_gate"}},
             {"type": "button", "name": "Log", "icon": "mdi:text-box-search-outline", "show_state": False,
-             "tap_action": {"action": "navigate", "navigation_path": f"/hassio/addon/{SELF_SLUG}/logs"}}]},
+             "tap_action": {"action": "navigate", "navigation_path": f"/config/app/{SELF_SLUG}/logs"}}]},
     ]
     pending = {"type": "conditional",
                "conditions": [{"condition": "numeric_state", "entity": "sensor.agent_gate_pending", "above": 0}],
-               "card": {"type": "markdown", "content":
-                        "**Commands waiting for your approval** (answer the phone notification)\n"
-                        "{% for i in state_attr('sensor.agent_gate_pending','items') or [] %}- `{{ i.id }}` {{ i.command }}\n{% endfor %}"}}
+               "card": {"type": "vertical-stack", "cards": [
+                   {"type": "markdown", "content":
+                    "**Commands waiting for your approval**\n"
+                    "{% for i in state_attr('sensor.agent_gate_pending','items') or [] %}- `{{ i.id }}` {{ i.command }}\n{% endfor %}"},
+                   {"type": "horizontal-stack", "cards": [
+                       _mqtt_btn("Approve newest", "mdi:check-circle-outline", "action", "AGENT_GATE_APPROVE_LATEST", "green"),
+                       _mqtt_btn("Reject all", "mdi:close-circle-outline", "action", "AGENT_GATE_REJECT_ALL", "red")]}]}}
     scan = [
         {"type": "button", "name": "Scan now", "icon": "mdi:shield-search", "show_state": False,
          "tap_action": {"action": "perform-action", "perform_action": "button.press",
