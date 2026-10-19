@@ -27,8 +27,8 @@ score, shortcuts, and the "open everything" buttons at the bottom.
   <img src="docs/images/dashboard-bottom.jpg" width="300" alt="Agent Gate dashboard: scan, shortcuts and open-all buttons">
 </p>
 
-*Screenshots show the Hebrew dashboard; English is the default and every
-label is translated.*
+*Five mechanisms open on a timed window, score 94/100 after a scan. The same
+dashboard is available in Hebrew.*
 
 ## Requirements
 
