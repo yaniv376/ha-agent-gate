@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.3
+
+- Dashboard: the security-events card rendered empty after an options-change
+  tamper event (Jinja read `e.keys` as a method); fixed in both languages.
+- Mechanism tiles show "until 15:26" so the time is never cut off.
+
 ## 0.5.2
 
 - Ready-made dashboard (English): shorter labels so nothing is cut off on

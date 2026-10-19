@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -1714,7 +1714,7 @@ DASH_STRINGS = {
         "ev_trap": "trap: `{what}` touched `{where}`", "ev_down": "gate down {m} min", "ev_opts": "options changed: {k}",
         "ev_lock": "burst of {n} deletions, locked", "ev_warn": "{n} writes in a minute", "ev_redact": "{n} secrets hidden from the agent",
         "mechanisms": "Mechanisms", "mech_hint": "Tap a card to open it for a duration you choose. Tap the icon for details.",
-        "closes_in": "until {t} ({m} min)", "open_until_closed": "open until you close it", "closed": "closed", "running_no_window": "running without a window!",
+        "closes_in": "until {t}", "open_until_closed": "open until you close it", "closed": "closed", "running_no_window": "running without a window!",
         "scan": "Security scan", "scan_now": "Scan now", "scanning": "Scanning...", "no_scan": "Not scanned yet",
         "score": "Score {s}/100", "prev_scans": "Previous scans", "prev_scans_sub": "Full report and history",
         "score_title": "Security score", "trend": "7 days", "report": "Scan report", "copy_report": "Copy or download the report",
@@ -1841,7 +1841,7 @@ def dashboard_config():
               "card": {"type": "vertical-stack", "cards": [
                   {"type": "markdown", "content": "**" + D("events_title") + "**\n"
                    "{% for h in state_attr('" + ev + "','canary_hits') or [] %}- 🪤 " + D("ev_trap", what="{{ h.what }}", where="{{ h.where }}") + " ({{ as_timestamp(h.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"
-                   "{% for e in state_attr('" + ev + "','tamper_events') or [] %}- ⚠️ {% if e.kind == 'down' %}" + D("ev_down", m="{{ e.minutes }}") + "{% else %}" + D("ev_opts", k="{{ e.keys | join(', ') }}") + "{% endif %} ({{ as_timestamp(e.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"
+                   "{% for e in state_attr('" + ev + "','tamper_events') or [] %}- ⚠️ {% if e.kind == 'down' %}" + D("ev_down", m="{{ e.minutes }}") + "{% else %}" + D("ev_opts", k="{{ e['keys'] | join(', ') }}") + "{% endif %} ({{ as_timestamp(e.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"
                    "{% for e in state_attr('" + ev + "','anomaly_events') or [] %}- 🚨 {% if e.kind == 'anomaly_lock' %}" + D("ev_lock", n="{{ e.count }}") + "{% else %}" + D("ev_warn", n="{{ e.count }}") + "{% endif %} `{{ e.tool }}` ({{ as_timestamp(e.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"
                    "{% set r = state_attr('" + ev + "','redactions_24h') | int(0) %}{% if r > 0 %}- 🔒 " + D("ev_redact", n="{{ r }}") + "\n{% endif %}"},
                   _btn(D("events_clear"), "mdi:shield-check", _mqtt_tap("action", "AGENT_GATE_CLEAR_HITS"), "red", entity=ev, columns=12)]}}
