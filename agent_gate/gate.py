@@ -56,7 +56,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.3.7"
+VERSION = "0.3.8"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -2193,7 +2193,25 @@ def main():
     log("Set this as 'MCP server URL' in the Webhook Proxy add-on.")
     log("=" * 60)
     srv = ThreadingServer(("0.0.0.0", port), GateHandler)
+
+    # The gate runs as PID 1 (init: false), and PID 1 ignores SIGTERM unless a
+    # handler is installed. Without this, every stop or update waits for the
+    # Supervisor's 10 s timeout and ends with SIGKILL (exit code 137).
+    def _stop(signum, frame):
+        log(f"signal {signum}: shutting down")
+        try:
+            save_state()
+            if MQTT_CLIENT:
+                MQTT_CLIENT.publish(AVAIL_TOPIC, "offline", qos=1, retain=True)
+                MQTT_CLIENT.loop_stop()
+        except Exception:
+            pass
+        threading.Thread(target=srv.shutdown, daemon=True).start()
+    import signal
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
     srv.serve_forever()
+    log("stopped")
 
 
 if __name__ == "__main__":
