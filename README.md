@@ -27,6 +27,9 @@ score, shortcuts, and the "open everything" buttons at the bottom.
   <img src="docs/images/dashboard-bottom.jpg" width="300" alt="Agent Gate dashboard: scan, shortcuts and open-all buttons">
 </p>
 
+*Screenshots show the Hebrew dashboard; English is the default and every
+label is translated.*
+
 ## Requirements
 
 - Home Assistant OS or Supervised (the add-on talks to the Supervisor; it
