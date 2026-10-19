@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -1714,17 +1714,17 @@ DASH_STRINGS = {
         "ev_trap": "trap: `{what}` touched `{where}`", "ev_down": "gate down {m} min", "ev_opts": "options changed: {k}",
         "ev_lock": "burst of {n} deletions, locked", "ev_warn": "{n} writes in a minute", "ev_redact": "{n} secrets hidden from the agent",
         "mechanisms": "Mechanisms", "mech_hint": "Tap a card to open it for a duration you choose. Tap the icon for details.",
-        "closes_in": "closes in {m} min ({t})", "open_until_closed": "open until you close it", "closed": "closed", "running_no_window": "running without a window!",
+        "closes_in": "until {t} ({m} min)", "open_until_closed": "open until you close it", "closed": "closed", "running_no_window": "running without a window!",
         "scan": "Security scan", "scan_now": "Scan now", "scanning": "Scanning...", "no_scan": "Not scanned yet",
         "score": "Score {s}/100", "prev_scans": "Previous scans", "prev_scans_sub": "Full report and history",
         "score_title": "Security score", "trend": "7 days", "report": "Scan report", "copy_report": "Copy or download the report",
         "scan_n": "Scan {n}", "no_data": "No data", "fix": "Fix: ", "confirm": "?",
-        "settings": "Settings and shortcuts", "backup_rem": "Backup and reminders", "backup_rem_sub": "Backup policy, reminders",
-        "addon_page": "Add-on page", "addon_page_sub": "Options, log, version", "check_updates": "Check for updates",
+        "settings": "Settings and shortcuts", "backup_rem": "Backup policy", "backup_rem_sub": "Backup policy, reminders",
+        "addon_page": "Add-on page", "addon_page_sub": "Options, log, version", "check_updates": "Check updates",
         "installed": "installed {v}", "new_version": "New version available", "update_gate": "Update the gate",
         "update_confirm": "Update Agent Gate? A backup of the add-on is made first.",
         "entities": "Gate entities", "log": "Gate log", "backups": "Backups", "backups_sub": "Restore a previous version",
-        "rebuild": "Rebuild this dashboard", "rebuild_sub": "Reset it to the add-on's current layout",
+        "rebuild": "Rebuild dashboard", "rebuild_sub": "Reset it to the add-on's current layout",
         "rebuild_confirm": "Replace this dashboard with the add-on's layout? Your edits to it are lost.",
         "open_all": "Open all", "m15": "15 min", "h1": "1 hour", "h3": "3 hours", "unlimited": "Until I close",
         "plus_hour": "+1 hour to everything open", "plus_hour_short": "+1 hour", "close": "Close now",
@@ -1908,7 +1908,7 @@ def dashboard_config():
         _btn(D("log"), "mdi:text-box-search-outline", _nav(f"/config/app/{SELF_SLUG}/logs")),
         _btn(D("backups"), "mdi:folder-clock-outline", _nav("/config/backup")),
         _btn(D("rebuild"), "mdi:view-dashboard-edit-outline", _mqtt_tap("action", "AGENT_GATE_REBUILD_DASHBOARD"),
-             "grey", confirm=D("rebuild_confirm")),
+             "grey", confirm=D("rebuild_confirm"), columns=12),
     ]
     # --- open all (bottom) -----------------------------------------------------
     open_cards = [

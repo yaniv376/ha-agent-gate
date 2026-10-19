@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.2
+
+- Ready-made dashboard (English): shorter labels so nothing is cut off on
+  a phone ("Backup policy", "Check updates", "Rebuild dashboard" full width),
+  and the window end on mechanism tiles now reads "until 15:26 (10 min)".
+
 ## 0.5.1
 - Dashboard: compact one-row tiles instead of tall button cards; mechanism tiles show "closes in N min (HH:MM)" (new `ends` attribute on the mechanism switches); built-in mechanism names follow the language (HA write / Commands).
 
