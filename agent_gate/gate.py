@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.4.4"
+VERSION = "0.4.5"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -1393,6 +1393,10 @@ def publish_discovery():
         _disc("sensor", f"scan_h{_n}", {"name": f"Security scan history {_n}", "icon": "mdi:shield-search",
                                         "state_topic": f"{BASE}/scan/h{_n}/state",
                                         "json_attributes_topic": f"{BASE}/scan/h{_n}/attributes"})
+    _disc("sensor", "security_score", {"name": "Security score", "icon": "mdi:shield-star",
+                                       "state_topic": f"{BASE}/scan/score/state",
+                                       "json_attributes_topic": f"{BASE}/scan/score/attributes",
+                                       "unit_of_measurement": "pts", "state_class": "measurement"})
     _disc("sensor", "pending", {"name": "Pending approvals", "icon": "mdi:account-question",
                                 "state_topic": f"{BASE}/pending/state",
                                 "json_attributes_topic": f"{BASE}/pending/attributes"})
@@ -1740,6 +1744,10 @@ def dashboard_config():
               "{% for e in state_attr('sensor.agent_gate_security_events','tamper_events') or [] %}- {{ 'gate down ' ~ e.minutes ~ ' min' if e.kind == 'down' else 'options changed: ' ~ (e.keys | join(', ')) }} ({{ as_timestamp(e.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"
               "{% for e in state_attr('sensor.agent_gate_security_events','anomaly_events') or [] %}- {{ 'burst of ' ~ e.count ~ ' deletions, locked' if e.kind == 'anomaly_lock' else e.count ~ ' writes in a minute' }} by `{{ e.tool }}` ({{ as_timestamp(e.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"},
              _mqtt_btn("I reviewed these, clear", "mdi:shield-check", "action", "AGENT_GATE_CLEAR_HITS", "red")]}},
+        {"type": "gauge", "entity": "sensor.agent_gate_security_score", "name": "Security score",
+         "min": 0, "max": 100, "needle": True, "severity": {"green": 90, "yellow": 70, "red": 0}},
+        {"type": "history-graph", "entities": [{"entity": "sensor.agent_gate_security_score", "name": "Score"}],
+         "hours_to_show": 168},
         {"type": "button", "name": "Scan now", "icon": "mdi:shield-search", "show_state": False,
          "tap_action": {"action": "perform-action", "perform_action": "button.press",
                         "target": {"entity_id": "button.agent_gate_scan_now"}}},
@@ -1795,7 +1803,7 @@ except Exception:
 def remember_scan(report):
     """Keep the last SCAN_SLOTS reports (with their text) for the dashboard history."""
     SCAN_HISTORY.insert(0, {"ts": report.get("ts"), "counts": report.get("counts", {}),
-                            "markdown": report.get("markdown", "")})
+                            "score": report.get("score"), "markdown": report.get("markdown", "")})
     del SCAN_HISTORY[SCAN_SLOTS:]
     try:
         with open(SCAN_HISTORY_PATH, "w", encoding="utf-8") as f:
@@ -1810,11 +1818,25 @@ def _scan_label(ts):
     except Exception:
         return str(ts or "")
 SEV_ORDER = {"critical": 0, "warning": 1, "info": 2, "ok": 3}
+SCORE_WEIGHTS = {"critical": 25, "warning": 10, "info": 3, "ok": 0}
+
+
+def security_score(findings):
+    """100 minus a weight per finding, never below 0. Band: good >= 90, fair >= 70, poor below."""
+    score = 100
+    for f in findings:
+        score -= SCORE_WEIGHTS.get(f.get("severity"), 0)
+    score = max(0, score)
+    band = "good" if score >= 90 else ("fair" if score >= 70 else "poor")
+    return score, band
+
+
 SCAN_STRINGS = {
     "en": {
         "sev": {"critical": "CRITICAL", "warning": "Warning", "info": "Info", "ok": "OK"},
         "report_title": "Security scan", "no_findings": "Nothing to report.",
         "summary": "{c} critical, {w} warnings, {i} notes",
+        "score_line": "Security score {score}/100",
         "fix": "Fix", "scan_failed": "Scan failed: {e}",
         "notify_title": "Agent Gate: security scan", "notify_new": "New critical findings:",
         "f_open": ("Open mechanisms", "{names} open since {since}.", "Close what you are not using."),
@@ -1852,6 +1874,7 @@ SCAN_STRINGS = {
         "sev": {"critical": "קריטי", "warning": "אזהרה", "info": "מידע", "ok": "תקין"},
         "report_title": "סריקת אבטחה", "no_findings": "אין ממצאים.",
         "summary": "{c} קריטיים, {w} אזהרות, {i} הערות",
+        "score_line": "ציון אבטחה {score}/100",
         "fix": "תיקון", "scan_failed": "הסריקה נכשלה: {e}",
         "notify_title": "שער הסוכן: סריקת אבטחה", "notify_new": "ממצאים קריטיים חדשים:",
         "f_open": ("מנגנונים פתוחים", "{names} פתוחים מאז {since}.", "סגור מה שאתה לא משתמש בו."),
@@ -2094,8 +2117,9 @@ def run_scan(source="manual"):
             findings.append(_finding("info", "f_tokens", n=len(toks), names=", ".join(toks[:10])))
         findings.sort(key=lambda f: SEV_ORDER.get(f["severity"], 9))
         counts = {s: sum(1 for f in findings if f["severity"] == s) for s in SEV_ORDER}
+        score, band = security_score(findings)
         report = {"ts": iso(now), "source": source, "counts": counts, "findings": findings,
-                  "markdown": scan_markdown(findings, now)}
+                  "score": score, "band": band, "markdown": scan_markdown(findings, now)}
         # notify on new critical findings
         prev = {f["key"] for f in LAST_SCAN.get("findings", []) if f["severity"] == "critical"}
         new_crit = [f for f in findings if f["severity"] == "critical" and f["key"] not in prev]
@@ -2178,7 +2202,7 @@ def scan_markdown(findings, when):
     c = sum(1 for f in findings if f["severity"] == "critical")
     w = sum(1 for f in findings if f["severity"] == "warning")
     i = sum(1 for f in findings if f["severity"] == "info")
-    lines.append(TS("summary", c=c, w=w, i=i))
+    lines.append(TS("summary", c=c, w=w, i=i) + " · " + TS("score_line", score=security_score(findings)[0]))
     if not findings:
         lines.append(TS("no_findings"))
     for f in findings:
@@ -2199,10 +2223,19 @@ def publish_scan():
     MQTT_CLIENT.publish(f"{BASE}/scan/state", state, qos=1, retain=True)
     MQTT_CLIENT.publish(f"{BASE}/scan/attributes", json.dumps({
         "ts": LAST_SCAN.get("ts"), "counts": counts, "findings": LAST_SCAN.get("findings", []),
+        "score": LAST_SCAN.get("score"), "band": LAST_SCAN.get("band"),
         "markdown": LAST_SCAN.get("markdown", ""),
         "report_url": f"http://{ha_host()}:{int(OPT.get('listen_port') or 9584)}{REPORT_PATH}/",
         "files": [f"{REPORT_DIR}/scan_latest.md", f"{REPORT_DIR}/scan_latest.json"]},
         ensure_ascii=False), qos=1, retain=True)
+    if LAST_SCAN.get("score") is not None:
+        MQTT_CLIENT.publish(f"{BASE}/scan/score/state", str(LAST_SCAN["score"]), qos=1, retain=True)
+        MQTT_CLIENT.publish(f"{BASE}/scan/score/attributes", json.dumps({
+            "ts": LAST_SCAN.get("ts"), "band": LAST_SCAN.get("band"), "counts": counts,
+            "weights": SCORE_WEIGHTS,
+            "deductions": [{"title": f["title"], "severity": f["severity"], "points": SCORE_WEIGHTS.get(f["severity"], 0)}
+                           for f in LAST_SCAN.get("findings", []) if SCORE_WEIGHTS.get(f["severity"], 0)]},
+            ensure_ascii=False), qos=1, retain=True)
     publish_scan_history()
 
 
@@ -2217,8 +2250,9 @@ def publish_scan_history():
             sev = "critical" if c.get("critical") else ("warning" if c.get("warning") else "ok")
             MQTT_CLIENT.publish(f"{BASE}/scan/h{n}/state", _scan_label(h.get("ts")), qos=1, retain=True)
             MQTT_CLIENT.publish(f"{BASE}/scan/h{n}/attributes", json.dumps({
-                "ts": h.get("ts"), "counts": c, "severity": sev,
-                "summary": TS("summary", c=c.get("critical", 0), w=c.get("warning", 0), i=c.get("info", 0)),
+                "ts": h.get("ts"), "counts": c, "severity": sev, "score": h.get("score"),
+                "summary": TS("summary", c=c.get("critical", 0), w=c.get("warning", 0), i=c.get("info", 0))
+                           + (f" · {h.get('score')}/100" if h.get("score") is not None else ""),
                 "markdown": h.get("markdown", "")}, ensure_ascii=False), qos=1, retain=True)
         else:
             MQTT_CLIENT.publish(f"{BASE}/scan/h{n}/state", "none", qos=1, retain=True)

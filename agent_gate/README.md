@@ -134,6 +134,11 @@ on its own when a defence fires. Its add-ons stop. When the last mechanism
 closes you get the session summary. Everything is appended to
 `/data/windows.jsonl`.
 
+**The score.** Every scan ends in a security score: 100 minus 25 per critical
+finding, 10 per warning and 3 per note, never below 0 (`sensor.agent_gate_security_score`,
+with the deductions as attributes; 90 and up is good, 70 to 89 fair). The
+ready-made dashboard shows it as a gauge with a 7-day trend.
+
 **Scanning.** *Scan now* on the dashboard, or on the schedule in
 `scan_interval_hours`. The report is on `sensor.agent_gate_scan`, in
 `/share/agent_gate/scan_latest.md`, and on a LAN page with copy and

@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.4.5
+- Security score (100 minus 25/10/3 per critical/warning/note) on `sensor.agent_gate_security_score`, in the report, in the scan history, and as a gauge with a 7-day trend on the ready-made dashboard.
+
 ## 0.4.4
 - Tamper check ignores options added or removed by an update; only changed values of existing keys count.
 
