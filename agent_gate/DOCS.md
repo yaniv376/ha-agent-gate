@@ -139,6 +139,15 @@ finding, 10 per warning and 3 per note, never below 0 (`sensor.agent_gate_securi
 with the deductions as attributes; 90 and up is good, 70 to 89 fair). The
 ready-made dashboard shows it as a gauge with a 7-day trend.
 
+**One-tap fixes.** Findings the gate can repair for you come with a *Fix*
+button on the dashboard (each asks for confirmation): turn off start-on-boot
+for the controlled add-ons, uninstall editing add-ons outside the gate,
+update add-ons (with a backup), enable the backstop automations, turn on the
+gate's watchdog. `binary_sensor.agent_gate_fix_<kind>` is `on` while a fix is
+available; MQTT `agent_gate/cmd/fix` with the kind as payload runs it. The
+gate never applies a fix on its own, and findings that need you (exposed
+ports, host networking, tokens, Core updates) keep their explanation only.
+
 **Scanning.** *Scan now* on the dashboard, or on the schedule in
 `scan_interval_hours`. The report is on `sensor.agent_gate_scan`, in
 `/share/agent_gate/scan_latest.md`, and on a LAN page with copy and

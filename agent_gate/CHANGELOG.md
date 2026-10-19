@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.4.7
+- One-tap fixes: boot off for controlled add-ons, uninstall uncontrolled editing add-ons, update add-ons with a backup, enable the backstop automations, watchdog on. `binary_sensor.agent_gate_fix_<kind>`, MQTT `agent_gate/cmd/fix`, buttons on the ready-made dashboard.
+
 ## 0.4.6
 - The report page refreshes its text when reopened and every 30 s, so a cached tab never shows an old scan.
 

@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.4.6"
+VERSION = "0.4.7"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -1397,6 +1397,11 @@ def publish_discovery():
                                        "state_topic": f"{BASE}/scan/score/state",
                                        "json_attributes_topic": f"{BASE}/scan/score/attributes",
                                        "unit_of_measurement": "pts", "state_class": "measurement"})
+    for kind in FIX_KINDS:
+        _disc("binary_sensor", f"fix_{kind}", {"name": f"Fix available: {kind}", "icon": "mdi:auto-fix",
+                                                "state_topic": f"{BASE}/fix/{kind}/state",
+                                                "json_attributes_topic": f"{BASE}/fix/{kind}/attributes",
+                                                "entity_category": "diagnostic"})
     _disc("sensor", "pending", {"name": "Pending approvals", "icon": "mdi:account-question",
                                 "state_topic": f"{BASE}/pending/state",
                                 "json_attributes_topic": f"{BASE}/pending/attributes"})
@@ -1544,6 +1549,8 @@ def on_mqtt_message(client, userdata, msg):
             publish_all()
         elif topic == f"{BASE}/cmd/button":
             handle_button(payload)
+        elif topic == f"{BASE}/cmd/fix":
+            _bg(apply_fix, payload.strip().lower())
         elif topic == f"{BASE}/action":
             handle_action(payload)
     except Exception as e:
@@ -1751,6 +1758,15 @@ def dashboard_config():
         {"type": "button", "name": "Scan now", "icon": "mdi:shield-search", "show_state": False,
          "tap_action": {"action": "perform-action", "perform_action": "button.press",
                         "target": {"entity_id": "button.agent_gate_scan_now"}}},
+    ] + [
+        {"type": "conditional",
+         "conditions": [{"condition": "state", "entity": f"binary_sensor.agent_gate_fix_{kind}", "state": "on"}],
+         "card": dict(_mqtt_btn("Fix: " + TS("fix_" + kind), "mdi:auto-fix", "cmd/fix", kind, "amber"),
+                      tap_action={"action": "perform-action", "perform_action": "mqtt.publish",
+                                  "data": {"topic": f"{BASE}/cmd/fix", "payload": kind},
+                                  "confirmation": {"text": TS("fix_" + kind) + "?"}})}
+        for kind in FIX_KINDS
+    ] + [
         {"type": "markdown", "content": "{{ state_attr('sensor.agent_gate_scan','markdown') or 'No scan yet.' }}"},
         {"type": "markdown", "content": "{% set u = state_attr('sensor.agent_gate_scan','report_url') %}"
                                         "{% if u %}[Copy / download the report]({{ u }}) · files in /share/agent_gate{% endif %}"},
@@ -1837,6 +1853,12 @@ SCAN_STRINGS = {
         "report_title": "Security scan", "no_findings": "Nothing to report.",
         "summary": "{c} critical, {w} warnings, {i} notes",
         "score_line": "Security score {score}/100",
+        "fix_boot_manual": "Turn off start-on-boot for the controlled add-ons",
+        "fix_uninstall_uncontrolled": "Uninstall the editing add-ons outside the gate",
+        "fix_update_addons": "Update the add-ons (with a backup)",
+        "fix_enable_backstop": "Enable the backstop automations",
+        "fix_watchdog_on": "Turn on the gate's watchdog",
+        "fix_done": "Fix applied: {label}", "fix_failed": "Fix failed: {label} ({err})",
         "fix": "Fix", "scan_failed": "Scan failed: {e}",
         "notify_title": "Agent Gate: security scan", "notify_new": "New critical findings:",
         "f_open": ("Open mechanisms", "{names} open since {since}.", "Close what you are not using."),
@@ -1875,6 +1897,12 @@ SCAN_STRINGS = {
         "report_title": "סריקת אבטחה", "no_findings": "אין ממצאים.",
         "summary": "{c} קריטיים, {w} אזהרות, {i} הערות",
         "score_line": "ציון אבטחה {score}/100",
+        "fix_boot_manual": "כבה הפעלה באתחול לתוספים הנשלטים",
+        "fix_uninstall_uncontrolled": "הסר את תוספי העריכה שמחוץ לשער",
+        "fix_update_addons": "עדכן את התוספים (עם גיבוי)",
+        "fix_enable_backstop": "הפעל את אוטומציות הגיבוי",
+        "fix_watchdog_on": "הדלק את ה-watchdog של השער",
+        "fix_done": "התיקון בוצע: {label}", "fix_failed": "התיקון נכשל: {label} ({err})",
         "fix": "תיקון", "scan_failed": "הסריקה נכשלה: {e}",
         "notify_title": "שער הסוכן: סריקת אבטחה", "notify_new": "ממצאים קריטיים חדשים:",
         "f_open": ("מנגנונים פתוחים", "{names} פתוחים מאז {since}.", "סגור מה שאתה לא משתמש בו."),
@@ -1940,6 +1968,54 @@ def _ws_tokens():
     except Exception as e:
         log(f"token listing unavailable: {e}")
         return None
+
+
+FIX_KINDS = ("boot_manual", "uninstall_uncontrolled", "update_addons", "enable_backstop", "watchdog_on")
+
+
+def apply_fix(kind):
+    """Carry out one of the scan's one-tap fixes, then rescan. Only the user
+    triggers this (MQTT agent_gate/cmd/fix); the agent cannot reach the topic."""
+    fix = next((f for f in LAST_SCAN.get("fixes", []) if f.get("kind") == kind), None)
+    label = TS("fix_" + kind) if kind in FIX_KINDS else kind
+    if not fix:
+        log(f"fix {kind}: nothing to do")
+        return
+    errors = []
+    try:
+        if kind == "boot_manual":
+            for slug in fix.get("slugs", []):
+                code, _ = _sup_request("POST", f"/addons/{slug}/options", {"boot": "manual"})
+                if code != 200:
+                    errors.append(f"{slug}: {code}")
+        elif kind == "uninstall_uncontrolled":
+            for slug in fix.get("slugs", []):
+                code, _ = _sup_request("POST", f"/addons/{slug}/uninstall", {}, timeout=120)
+                if code != 200:
+                    errors.append(f"{slug}: {code}")
+        elif kind == "update_addons":
+            for slug in fix.get("slugs", []):
+                code, _ = _sup_request("POST", f"/addons/{slug}/update", {"backup": True}, timeout=600)
+                if code != 200:
+                    errors.append(f"{slug}: {code}")
+        elif kind == "enable_backstop":
+            ok = ha_call_service("automation", "turn_on", {"entity_id": fix.get("entities", [])})
+            if not ok:
+                errors.append("automation.turn_on")
+        elif kind == "watchdog_on":
+            code, _ = _sup_request("POST", f"/addons/{SELF_SLUG}/options", {"watchdog": True})
+            if code != 200:
+                errors.append(f"watchdog: {code}")
+    except Exception as e:
+        errors.append(str(e))
+    audit({"tool": "fix", "decision": "ok" if not errors else "error", "reason": kind,
+           "mode": STATE["mode"], "window_id": STATE.get("window_id"), "args_preview": json.dumps(fix, ensure_ascii=False)[:300]})
+    if errors:
+        notify(TS("report_title"), TS("fix_failed", label=label, err="; ".join(errors)[:200]), tag="agent_gate_fix")
+    else:
+        notify(TS("report_title"), TS("fix_done", label=label), tag="agent_gate_fix")
+    time.sleep(2)
+    run_scan("fix")
 
 
 SCAN_COOLDOWN = 60  # seconds between scan starts
@@ -2033,6 +2109,7 @@ def run_scan(source="manual"):
         # 2. add-ons
         unprotected, hostnet, ports, addon_updates, ssh_pw, addon_pw, tunnels = [], [], [], [], [], [], []
         uncontrolled, boot_auto = [], []
+        uncontrolled_slugs, boot_auto_slugs, update_slugs = [], [], []
         controlled = {x for m in MECHANISMS for x in m["addons"]}
         try:
             code, data = _sup_request("GET", "/addons", timeout=30)
@@ -2045,6 +2122,7 @@ def run_scan(source="manual"):
                 continue
             if slug != SELF_SLUG and slug not in controlled and any(h in slug.lower() for h in EDIT_ADDON_HINTS):
                 uncontrolled.append(a.get("name") or slug)
+                uncontrolled_slugs.append(slug)
             if a.get("state") != "started" and not a.get("update_available") and slug not in controlled:
                 continue
             try:
@@ -2056,8 +2134,11 @@ def run_scan(source="manual"):
             running = info.get("state") == "started"
             if info.get("update_available") or a.get("update_available"):
                 addon_updates.append(f"{name} ({info.get('version')} -> {info.get('version_latest')})")
+                if slug != SELF_SLUG:
+                    update_slugs.append(slug)
             if slug in controlled and info.get("boot") == "auto":
                 boot_auto.append(name)
+                boot_auto_slugs.append(slug)
             if not running:
                 continue
             if slug != SELF_SLUG and info.get("protected") is False:
@@ -2118,8 +2199,22 @@ def run_scan(source="manual"):
         findings.sort(key=lambda f: SEV_ORDER.get(f["severity"], 9))
         counts = {s: sum(1 for f in findings if f["severity"] == s) for s in SEV_ORDER}
         score, band = security_score(findings)
+        # One-tap fixes the gate can carry out for the user (never on its own).
+        fixes = []
+        if boot_auto_slugs:
+            fixes.append({"kind": "boot_manual", "slugs": boot_auto_slugs, "names": boot_auto})
+        if uncontrolled_slugs:
+            fixes.append({"kind": "uninstall_uncontrolled", "slugs": uncontrolled_slugs, "names": uncontrolled})
+        if update_slugs:
+            fixes.append({"kind": "update_addons", "slugs": update_slugs, "names": addon_updates})
+        if disabled:
+            fixes.append({"kind": "enable_backstop", "entities": disabled, "names": disabled})
+        if any(f["key"] == "f_watchdog" for f in findings):
+            fixes.append({"kind": "watchdog_on", "names": []})
+        for f in fixes:
+            f["label"] = TS("fix_" + f["kind"])
         report = {"ts": iso(now), "source": source, "counts": counts, "findings": findings,
-                  "score": score, "band": band, "markdown": scan_markdown(findings, now)}
+                  "score": score, "band": band, "fixes": fixes, "markdown": scan_markdown(findings, now)}
         # notify on new critical findings
         prev = {f["key"] for f in LAST_SCAN.get("findings", []) if f["severity"] == "critical"}
         new_crit = [f for f in findings if f["severity"] == "critical" and f["key"] not in prev]
@@ -2226,10 +2321,19 @@ def publish_scan():
     MQTT_CLIENT.publish(f"{BASE}/scan/attributes", json.dumps({
         "ts": LAST_SCAN.get("ts"), "counts": counts, "findings": LAST_SCAN.get("findings", []),
         "score": LAST_SCAN.get("score"), "band": LAST_SCAN.get("band"),
+        "fixes": LAST_SCAN.get("fixes", []),
         "markdown": LAST_SCAN.get("markdown", ""),
         "report_url": f"http://{ha_host()}:{int(OPT.get('listen_port') or 9584)}{REPORT_PATH}/",
         "files": [f"{REPORT_DIR}/scan_latest.md", f"{REPORT_DIR}/scan_latest.json"]},
         ensure_ascii=False), qos=1, retain=True)
+    avail = {f["kind"]: f for f in LAST_SCAN.get("fixes", [])}
+    for kind in FIX_KINDS:
+        f = avail.get(kind)
+        MQTT_CLIENT.publish(f"{BASE}/fix/{kind}/state", "ON" if f else "OFF", qos=1, retain=True)
+        MQTT_CLIENT.publish(f"{BASE}/fix/{kind}/attributes", json.dumps({
+            "label": TS("fix_" + kind), "names": (f or {}).get("names", []),
+            "slugs": (f or {}).get("slugs", []), "entities": (f or {}).get("entities", [])},
+            ensure_ascii=False), qos=1, retain=True)
     if LAST_SCAN.get("score") is not None:
         MQTT_CLIENT.publish(f"{BASE}/scan/score/state", str(LAST_SCAN["score"]), qos=1, retain=True)
         MQTT_CLIENT.publish(f"{BASE}/scan/score/attributes", json.dumps({
