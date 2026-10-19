@@ -82,6 +82,22 @@ Two ideas borrowed from endpoint security:
   Supervisor watchdog, and read-only patterns broad enough to let write tools
   through (`*`, `ha_config_set_*` ...).
 
+## Secrets never reach the agent
+
+Every tool result and every command output passes through the gate on its way
+back. With `redact_secrets` (default on) the gate replaces passwords, tokens,
+API keys, bearer/basic headers, JWTs (Home Assistant long-lived tokens),
+private keys and credentials in URLs with `[redacted by Agent Gate]`. Keys stay
+visible, values do not, so the agent can still read `secrets.yaml` to learn
+what exists without learning the values. `redact_patterns` adds your own
+regular expressions. Each redaction is counted in the audit log and in
+`sensor.agent_gate_security_events`; the scan lists them as a note.
+
+Decoy hits and tamper events of the last 24 h appear on
+`sensor.agent_gate_security_events` with a dashboard button
+("I reviewed these, clear" = MQTT `agent_gate/action` payload
+`AGENT_GATE_CLEAR_HITS`) that acknowledges them.
+
 ## Destructive commands
 
 `gate_run_command` holds any command matching `destructive_patterns` and sends

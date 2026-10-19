@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -118,6 +118,8 @@ def load_options():
         "protected_patterns": ["agent_gate"],
         "destructive_patterns": [],
         "mechanisms": [],
+        "redact_secrets": True,
+        "redact_patterns": [],
         "canary_enabled": True,
         "canary_files": ["/homeassistant/secrets_backup.yaml", "/share/agent_gate/credentials.txt"],
     }
@@ -699,6 +701,93 @@ def tamper_events_recent(hours=24):
     return [e for e in ev if parse_iso(e.get("ts")) and parse_iso(e["ts"]) >= cutoff]
 
 
+# --------------------------------------------------------------------------
+# 3c. secret redaction (DLP): tool results and command output are scanned
+# before they reach the agent; credentials are replaced by a marker.
+# --------------------------------------------------------------------------
+REDACT_ENABLED = bool(OPT.get("redact_secrets", True))
+REDACT_MARK = "[redacted by Agent Gate]"
+_SECRET_KEYS = (r"(?:password|passwd|pwd|pass|secret|token|access_token|refresh_token|api_key|apikey|"
+                r"api_token|auth_token|client_secret|private_key|secret_key|access_key|license_key|"
+                r"encryption_key|bearer|authorization|credentials?|psk|wpa_passphrase|session_key)")
+REDACT_RULES = [
+    # key: value / key=value / "key": "value" (YAML, JSON, .env, logs); keeps the key, hides the value
+    (re.compile(r'(?i)((?:\\?"|\')?' + _SECRET_KEYS + r'(?:_[a-z0-9]+)?(?:\\?"|\')?\s*[:=]\s*(?:\\?"|\')?)'
+                r'(?!\s*(?:null|none|true|false|bearer|basic|<redacted|\[redacted|\*{3})[\s,\]}"\\])([^\s,}\]"\\]{4,})'),
+     r"\1" + REDACT_MARK),
+    # bearer tokens in headers and curl lines
+    (re.compile(r"(?i)(bearer\s+)([A-Za-z0-9._\-]{16,})"), r"\1" + REDACT_MARK),
+    (re.compile(r"(?i)(basic\s+)([A-Za-z0-9+/=]{8,})"), r"\1" + REDACT_MARK),
+    # JWTs (Home Assistant long-lived tokens are JWTs)
+    (re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"), REDACT_MARK),
+    # PEM private keys
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S), REDACT_MARK),
+    # well-known API key shapes
+    (re.compile(r"\b(?:sk|rk)-[A-Za-z0-9_\-]{20,}\b"), REDACT_MARK),                  # OpenAI/Anthropic style
+    (re.compile(r"\bxox[abposr]-[A-Za-z0-9\-]{10,}\b"), REDACT_MARK),                 # Slack
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), REDACT_MARK),                      # GitHub
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), REDACT_MARK),                               # AWS
+    (re.compile(r"\bAIza[0-9A-Za-z_\-]{30,}\b"), REDACT_MARK),                        # Google
+    (re.compile(r"\b[0-9]{8,10}:[A-Za-z0-9_\-]{35}\b"), REDACT_MARK),                 # Telegram bot
+    (re.compile(r"(?i)(https?://[^\s/]+:)([^\s@/]{3,})@"), r"\1" + REDACT_MARK + "@"),  # creds in URLs
+]
+for _p in (OPT.get("redact_patterns") or []):
+    try:
+        REDACT_RULES.append((re.compile(_p, re.I), REDACT_MARK))
+    except re.error as e:
+        log(f"redact pattern {_p!r} ignored: {e}")
+_REDACT_LOCK = threading.Lock()
+
+
+def redact_text(text):
+    """Return (text, count). Never raises; on error returns the input unchanged."""
+    if not REDACT_ENABLED or not text:
+        return text, 0
+    total = 0
+    try:
+        for rx, repl in REDACT_RULES:
+            text, n = rx.subn(repl, text)
+            total += n
+    except Exception as e:
+        log(f"redaction error: {e}")
+    return text, total
+
+
+def note_redactions(tool, n):
+    if not n:
+        return
+    with _REDACT_LOCK:
+        with STATE_LOCK:
+            lst = STATE.setdefault("redactions", [])
+            lst.insert(0, {"ts": iso(now_utc()), "tool": tool, "n": n})
+            del lst[50:]
+            save_state()
+    audit({"tool": tool, "decision": "redact", "reason": f"{n} secret(s) hidden in the result",
+           "mode": STATE["mode"], "window_id": STATE.get("window_id"), "args_preview": ""})
+
+
+def redactions_recent(hours=24):
+    cutoff = now_utc() - timedelta(hours=hours)
+    with STATE_LOCK:
+        lst = list(STATE.get("redactions") or [])
+    return [r for r in lst if parse_iso(r.get("ts")) and parse_iso(r["ts"]) >= cutoff]
+
+
+def redact_response_body(ctype, raw, tool):
+    """Scan an upstream tools/call response (JSON or SSE) and hide secrets."""
+    if not REDACT_ENABLED or not raw:
+        return raw
+    try:
+        text = raw.decode("utf-8")
+    except Exception:
+        return raw
+    new, n = redact_text(text)
+    if n:
+        note_redactions(tool, n)
+        return new.encode("utf-8")
+    return raw
+
+
 def evaluate_tool_call(name, arguments):
     """Returns (decision, reason). decision in {'allow','deny','local'}."""
     hit = canary_match(json.dumps(arguments or {}, ensure_ascii=False))
@@ -1204,6 +1293,9 @@ def publish_discovery():
     _disc("sensor", "pending", {"name": "Pending approvals", "icon": "mdi:account-question",
                                 "state_topic": f"{BASE}/pending/state",
                                 "json_attributes_topic": f"{BASE}/pending/attributes"})
+    _disc("sensor", "security_events", {"name": "Security events (24 h)", "icon": "mdi:shield-alert",
+                                        "state_topic": f"{BASE}/security_events/state",
+                                        "json_attributes_topic": f"{BASE}/security_events/attributes"})
 
 
 _LAST_ACTUAL = {}
@@ -1252,6 +1344,8 @@ def publish_all(actual=None, deviation=None):
         "open_names": [mech_name(k) for k in windows],
         "backup": st.get("backup"), "deviation": deviation, "phase": st.get("phase"),
         "canary_hits_24h": len(canary_hits_recent()), "tamper_events_24h": len(tamper_events_recent()),
+        "redactions_24h": sum(r.get("n", 0) for r in redactions_recent()),
+        "last_canary_hit": (canary_hits_recent() or [{}])[0].get("ts"),
         "actual": {k: v.get("running") for k, v in actual.items()},
         "language": LANG,
     }, ensure_ascii=False), qos=1, retain=True)
@@ -1272,6 +1366,13 @@ def publish_all(actual=None, deviation=None):
     pub(f"{BASE}/pending/state", str(len(pend)), qos=1, retain=True)
     pub(f"{BASE}/pending/attributes", json.dumps({
         "items": [{"id": k, "command": v["command"][:120], "created": v["created"]} for k, v in pend.items()]
+    }, ensure_ascii=False), qos=1, retain=True)
+    hits, tev, reds = canary_hits_recent(), tamper_events_recent(), redactions_recent()
+    pub(f"{BASE}/security_events/state", str(len(hits) + len(tev)), qos=1, retain=True)
+    pub(f"{BASE}/security_events/attributes", json.dumps({
+        "canary_hits": hits[:10], "tamper_events": tev[:10],
+        "redactions_24h": sum(r.get("n", 0) for r in reds), "last_redaction": (reds or [{}])[0],
+        "cleared_at": st.get("hits_cleared_at"),
     }, ensure_ascii=False), qos=1, retain=True)
 
 
@@ -1387,6 +1488,17 @@ def handle_action(payload):
         extend_window(int(action.rsplit("_", 1)[1]))
     elif action.startswith("AGENT_GATE_OPEN_"):
         _bg(open_window, int(action.rsplit("_", 1)[1]), "phone")
+    elif action == "AGENT_GATE_CLEAR_HITS":
+        # The user reviewed the decoy hits / tamper events and acknowledges them.
+        with STATE_LOCK:
+            n = len(STATE.get("canary_hits") or []) + len(STATE.get("tamper_events") or [])
+            STATE["canary_hits"] = []
+            STATE["tamper_events"] = []
+            STATE["hits_cleared_at"] = iso(now_utc())
+            save_state()
+        log(f"security events acknowledged and cleared ({n})")
+        _bg(run_scan, "clear")
+        publish_all()
     elif action.startswith("AGENT_GATE_APPROVE_") or action.startswith("AGENT_GATE_REJECT_"):
         pid = action.rsplit("_", 1)[1]
         verdict = "approved" if "APPROVE" in action else "rejected"
@@ -1515,6 +1627,14 @@ def dashboard_config():
                        _mqtt_btn("Approve newest", "mdi:check-circle-outline", "action", "AGENT_GATE_APPROVE_LATEST", "green"),
                        _mqtt_btn("Reject all", "mdi:close-circle-outline", "action", "AGENT_GATE_REJECT_ALL", "red")]}]}}
     scan = [
+        {"type": "conditional",
+         "conditions": [{"condition": "numeric_state", "entity": "sensor.agent_gate_security_events", "above": 0}],
+         "card": {"type": "vertical-stack", "cards": [
+             {"type": "markdown", "content":
+              "**Security events in the last 24 h**\n"
+              "{% for h in state_attr('sensor.agent_gate_security_events','canary_hits') or [] %}- trap: `{{ h.what }}` touched `{{ h.where }}` ({{ as_timestamp(h.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"
+              "{% for e in state_attr('sensor.agent_gate_security_events','tamper_events') or [] %}- {{ 'gate down ' ~ e.minutes ~ ' min' if e.kind == 'down' else 'options changed: ' ~ (e.keys | join(', ')) }} ({{ as_timestamp(e.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"},
+             _mqtt_btn("I reviewed these, clear", "mdi:shield-check", "action", "AGENT_GATE_CLEAR_HITS", "red")]}},
         {"type": "button", "name": "Scan now", "icon": "mdi:shield-search", "show_state": False,
          "tap_action": {"action": "perform-action", "perform_action": "button.press",
                         "target": {"entity_id": "button.agent_gate_scan_now"}}},
@@ -1619,6 +1739,7 @@ SCAN_STRINGS = {
         "f_policy_broad": ("Read-only patterns allow write tools", "{names}", "Remove patterns like * or ha_config_set_* from read_tool_patterns."),
         "f_options_changed": ("Gate options changed while it was down", "{keys} at {when}", "If that was not you, review the add-on configuration."),
         "f_downtime": ("Gate was down", "{mins} min, until {when}", "Check the add-on log; while the gate is down the lock is enforced only by the backstop automations."),
+        "f_redacted": ("Secrets hidden from the agent", "{n} value(s) in 24 h, last by {tool}", "The agent asked for files or data holding credentials. Fine if you expected it; otherwise review the audit log."),
     },
     "he": {
         "sev": {"critical": "קריטי", "warning": "אזהרה", "info": "מידע", "ok": "תקין"},
@@ -1653,6 +1774,7 @@ SCAN_STRINGS = {
         "f_policy_broad": ("תבניות הקריאה מתירות כלי כתיבה", "{names}", "הסר תבניות כמו * או ha_config_set_* מ-read_tool_patterns."),
         "f_options_changed": ("הגדרות השער השתנו בזמן שהוא לא רץ", "{keys} ב-{when}", "אם זה לא היית אתה, בדוק את הגדרות התוסף."),
         "f_downtime": ("השער לא רץ", "{mins} דקות, עד {when}", "בדוק את לוג התוסף; כשהשער לא רץ, רק אוטומציות הגיבוי אוכפות את הנעילה."),
+        "f_redacted": ("סודות הוסתרו מהסוכן", "{n} ערכים ב-24 שעות, האחרון דרך {tool}", "הסוכן ביקש קבצים או נתונים עם פרטי גישה. בסדר אם ציפית לזה; אחרת בדוק את יומן הביקורת."),
     },
 }
 
@@ -1757,6 +1879,9 @@ def run_scan(source="manual"):
                                          when=fmt_local(e["ts"])))
             elif e.get("kind") == "down":
                 findings.append(_finding("warning", "f_downtime", mins=e.get("minutes"), when=fmt_local(e["ts"])))
+        reds = redactions_recent()
+        if reds:
+            findings.append(_finding("info", "f_redacted", n=sum(r.get("n", 0) for r in reds), tool=reds[0].get("tool")))
         if CANARY_ENABLED:
             hits = canary_hits_recent()
             if hits:
@@ -2243,6 +2368,8 @@ class GateHandler(http.server.BaseHTTPRequestHandler):
             ctype = resp.getheader("Content-Type", "") or ""
             if isinstance(msg, dict) and msg.get("method") == "tools/list":
                 raw = rewrite_tools_list_body(ctype, raw)
+            elif isinstance(msg, dict) and msg.get("method") == "tools/call":
+                raw = redact_response_body(ctype, raw, (msg.get("params") or {}).get("name", ""))
             self.send_response(resp.status)
             for k, v in resp.getheaders():
                 if k.lower() not in HOP_HEADERS:
@@ -2311,6 +2438,8 @@ def execute_command(command, cwd, timeout, approval_id=None):
         text += f"\n... ({len(out) - limit} more bytes)"
     if err:
         text += f"\n--- stderr ---\n{err[:limit]}"
+    text, n = redact_text(text)
+    note_redactions("gate_run_command", n)
     return tool_text(text, rc != 0)
 
 

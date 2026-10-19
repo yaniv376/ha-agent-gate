@@ -44,6 +44,12 @@ configuration:
   destructive_patterns:
     name: Destructive command patterns
     description: Shell commands matching these regular expressions need your approval on the phone before they run.
+  redact_secrets:
+    name: Hide secrets from the agent
+    description: Passwords, tokens, API keys and private keys in tool results and command output are replaced by a marker before they reach the agent.
+  redact_patterns:
+    name: Extra secret patterns
+    description: Additional regular expressions (case-insensitive) whose matches are hidden as well.
   canary_enabled:
     name: Decoy files (honeypot)
     description: Plant decoy "secrets" files. Any tool call or command that touches one is refused, every mechanism closes at once, and you get a notification.
