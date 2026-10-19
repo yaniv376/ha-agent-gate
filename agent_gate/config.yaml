@@ -1,6 +1,6 @@
 name: "Agent Gate"
 description: "On/off access gate for AI agents: MCP write lock, shell command tool, controlled add-ons, timed windows"
-version: "0.4.2"
+version: "0.4.3"
 slug: "agent_gate"
 url: "https://github.com/yaniv376/ha-agent-gate"
 arch:
@@ -79,6 +79,9 @@ options:
     - "\\bshutdown\\b"
     - "\\bkill"
     - "\\bgit\\s+(reset|clean|checkout\\s+--|push\\s+-f)"
+  anomaly_enabled: true
+  anomaly_writes_warn_per_min: 60
+  anomaly_deletes_lock_per_min: 5
   redact_secrets: true
   redact_patterns: []
   canary_enabled: true
@@ -122,6 +125,9 @@ schema:
     - str?
   destructive_patterns:
     - str?
+  anomaly_enabled: bool?
+  anomaly_writes_warn_per_min: int(0,1000)?
+  anomaly_deletes_lock_per_min: int(0,100)?
   redact_secrets: bool?
   redact_patterns:
     - str?

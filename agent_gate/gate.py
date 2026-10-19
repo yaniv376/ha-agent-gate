@@ -28,6 +28,7 @@ Layout of this file:
   8. main
 """
 
+import collections
 import fnmatch
 import hashlib
 import http.client
@@ -57,7 +58,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -118,6 +119,9 @@ def load_options():
         "protected_patterns": ["agent_gate"],
         "destructive_patterns": [],
         "mechanisms": [],
+        "anomaly_enabled": True,
+        "anomaly_writes_warn_per_min": 60,
+        "anomaly_deletes_lock_per_min": 5,
         "redact_secrets": True,
         "redact_patterns": [],
         "canary_enabled": True,
@@ -301,6 +305,9 @@ STRINGS = {
         "approve_hint": "Approve or reject with the buttons on the phone notification or on the Agent Gate dashboard.",
         "canary_title": "Agent Gate: TRAP TRIPPED, locked",
         "canary_body": "{what} touched a decoy ({where}). Nothing real was exposed. Every mechanism was closed. Review the agent's recent actions before opening again.",
+        "anomaly_title": "Agent Gate: unusual activity",
+        "anomaly_lock_body": "{n} delete/stop operations within a minute (last: {tool}). Every mechanism was closed. Open a window again only if this was you.",
+        "anomaly_warn_body": "{n} write operations within a minute (last: {tool}). Still open. Lock if this is not what you expected.",
         "tamper_title": "Agent Gate: tamper warning",
         "tamper_options": "The gate's options changed while it was down: {keys}. If that was not you, review the add-on configuration.",
         "tamper_down": "The gate was not running for {mins} min (until {until}). During that time nothing enforced the lock.",
@@ -321,6 +328,9 @@ STRINGS = {
         "approve_hint": "אישור או דחייה בכפתורים שבהתראת הטלפון או בדשבורד של השער.",
         "canary_title": "שער הסוכן: המלכודת הופעלה, ננעל",
         "canary_body": "{what} נגע בפיתיון ({where}). שום דבר אמיתי לא נחשף. כל המנגנונים נסגרו. בדוק את הפעולות האחרונות של הסוכן לפני פתיחה מחדש.",
+        "anomaly_title": "שער הסוכן: פעילות חריגה",
+        "anomaly_lock_body": "{n} פעולות מחיקה או עצירה בתוך דקה (האחרונה: {tool}). כל המנגנונים נסגרו. פתח חלון שוב רק אם זה היית אתה.",
+        "anomaly_warn_body": "{n} פעולות כתיבה בתוך דקה (האחרונה: {tool}). עדיין פתוח. נעל אם זה לא מה שציפית.",
         "tamper_title": "שער הסוכן: אזהרת חבלה",
         "tamper_options": "הגדרות השער השתנו בזמן שהוא לא רץ: {keys}. אם זה לא היית אתה, בדוק את הגדרות התוסף.",
         "tamper_down": "השער לא רץ במשך {mins} דקות (עד {until}). בזמן הזה שום דבר לא אכף את הנעילה.",
@@ -788,6 +798,93 @@ def redact_response_body(ctype, raw, tool):
     return raw
 
 
+# --------------------------------------------------------------------------
+# 3d. behaviour monitor (rate limits, like an IPS)
+#
+# Plain writes only warn: building something legitimately means many writes.
+# Deletions, removals, stops and uninstalls have no honest reason to come in
+# bursts, so a burst of those locks everything. "Until I close" windows mean
+# the user is working on a project: thresholds double.
+# --------------------------------------------------------------------------
+ANOMALY_ENABLED = bool(OPT.get("anomaly_enabled", True))
+_WRITES = collections.deque()
+_DELETES = collections.deque()
+_ANOMALY_LOCK = threading.Lock()
+_LAST_ANOMALY_WARN = 0.0
+
+
+def is_delete_like(name, args):
+    n = (name or "").lower()
+    if any(x in n for x in ("remove", "delete", "purge", "uninstall")):
+        return True
+    if n == "ha_manage_app" and str((args or {}).get("action") or "").lower() in ("uninstall", "stop"):
+        return True
+    if n == "ha_call_service":
+        svc = f"{(args or {}).get('domain', '')}.{(args or {}).get('service', '')}".lower()
+        if any(x in svc for x in ("delete", "remove", "purge", "factory_reset", "reset")):
+            return True
+    return False
+
+
+def _anomaly_thresholds():
+    w = int(OPT.get("anomaly_writes_warn_per_min") or 60)
+    d = int(OPT.get("anomaly_deletes_lock_per_min") or 5)
+    with STATE_LOCK:
+        unlimited = any(not v.get("end") for v in (STATE.get("windows") or {}).values())
+    return (w * 2, d * 2) if unlimited else (w, d)
+
+
+def anomaly_check(name, args):
+    """Call for every allowed write tool. Returns a deny reason, or None."""
+    global _LAST_ANOMALY_WARN
+    if not ANOMALY_ENABLED:
+        return None
+    now = time.time()
+    warn_n, lock_n = _anomaly_thresholds()
+    with _ANOMALY_LOCK:
+        for dq in (_WRITES, _DELETES):
+            while dq and now - dq[0] > 60:
+                dq.popleft()
+        _WRITES.append(now)
+        deletes = 0
+        if is_delete_like(name, args):
+            _DELETES.append(now)
+            deletes = len(_DELETES)
+        writes = len(_WRITES)
+    if lock_n and deletes >= lock_n:
+        ev = {"ts": iso(now_utc()), "kind": "anomaly_lock", "count": deletes, "tool": name}
+        with STATE_LOCK:
+            lst = STATE.setdefault("anomaly_events", [])
+            lst.insert(0, ev)
+            del lst[20:]
+            save_state()
+        with _ANOMALY_LOCK:
+            _DELETES.clear()
+        log(f"ANOMALY: {deletes} delete-like calls in a minute, locking")
+        _bg(lock_window, "anomaly")
+        notify(T("anomaly_title"), T("anomaly_lock_body", n=deletes, tool=name), tag="agent_gate_anomaly")
+        _bg(publish_all)
+        return "unusual burst of delete/stop operations; the gate has been locked and the user notified"
+    if warn_n and writes >= warn_n and now - _LAST_ANOMALY_WARN > 600:
+        _LAST_ANOMALY_WARN = now
+        ev = {"ts": iso(now_utc()), "kind": "anomaly_warn", "count": writes, "tool": name}
+        with STATE_LOCK:
+            lst = STATE.setdefault("anomaly_events", [])
+            lst.insert(0, ev)
+            del lst[20:]
+            save_state()
+        notify(T("anomaly_title"), T("anomaly_warn_body", n=writes, tool=name),
+               actions=[{"action": "AGENT_GATE_LOCK", "title": T("btn_lock")}], tag="agent_gate_anomaly")
+    return None
+
+
+def anomaly_events_recent(hours=24):
+    cutoff = now_utc() - timedelta(hours=hours)
+    with STATE_LOCK:
+        ev = list(STATE.get("anomaly_events") or [])
+    return [e for e in ev if parse_iso(e.get("ts")) and parse_iso(e["ts"]) >= cutoff]
+
+
 def evaluate_tool_call(name, arguments):
     """Returns (decision, reason). decision in {'allow','deny','local'}."""
     hit = canary_match(json.dumps(arguments or {}, ensure_ascii=False))
@@ -802,6 +899,9 @@ def evaluate_tool_call(name, arguments):
     if name not in PROTECTED_EXEMPT and (touches_protected(arguments) or any(p in name.lower() for p in PROTECTED)):
         return "deny", "touches the gate's own entities or topics; only the dashboard controls the gate"
     if is_active("ha_write"):
+        bad = anomaly_check(name, arguments)
+        if bad:
+            return "deny", bad
         return "allow", "window open"
     return "deny", ("Agent Gate is LOCKED for HA writes. Write tools are refused until the user opens "
                     "the 'HA write' mechanism from the dashboard. Ask the user to open the gate, then retry.")
@@ -1367,10 +1467,10 @@ def publish_all(actual=None, deviation=None):
     pub(f"{BASE}/pending/attributes", json.dumps({
         "items": [{"id": k, "command": v["command"][:120], "created": v["created"]} for k, v in pend.items()]
     }, ensure_ascii=False), qos=1, retain=True)
-    hits, tev, reds = canary_hits_recent(), tamper_events_recent(), redactions_recent()
-    pub(f"{BASE}/security_events/state", str(len(hits) + len(tev)), qos=1, retain=True)
+    hits, tev, reds, anom = canary_hits_recent(), tamper_events_recent(), redactions_recent(), anomaly_events_recent()
+    pub(f"{BASE}/security_events/state", str(len(hits) + len(tev) + len(anom)), qos=1, retain=True)
     pub(f"{BASE}/security_events/attributes", json.dumps({
-        "canary_hits": hits[:10], "tamper_events": tev[:10],
+        "canary_hits": hits[:10], "tamper_events": tev[:10], "anomaly_events": anom[:10],
         "redactions_24h": sum(r.get("n", 0) for r in reds), "last_redaction": (reds or [{}])[0],
         "cleared_at": st.get("hits_cleared_at"),
     }, ensure_ascii=False), qos=1, retain=True)
@@ -1494,6 +1594,7 @@ def handle_action(payload):
             n = len(STATE.get("canary_hits") or []) + len(STATE.get("tamper_events") or [])
             STATE["canary_hits"] = []
             STATE["tamper_events"] = []
+            STATE["anomaly_events"] = []
             STATE["hits_cleared_at"] = iso(now_utc())
             save_state()
         log(f"security events acknowledged and cleared ({n})")
@@ -1633,7 +1734,8 @@ def dashboard_config():
              {"type": "markdown", "content":
               "**Security events in the last 24 h**\n"
               "{% for h in state_attr('sensor.agent_gate_security_events','canary_hits') or [] %}- trap: `{{ h.what }}` touched `{{ h.where }}` ({{ as_timestamp(h.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"
-              "{% for e in state_attr('sensor.agent_gate_security_events','tamper_events') or [] %}- {{ 'gate down ' ~ e.minutes ~ ' min' if e.kind == 'down' else 'options changed: ' ~ (e.keys | join(', ')) }} ({{ as_timestamp(e.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"},
+              "{% for e in state_attr('sensor.agent_gate_security_events','tamper_events') or [] %}- {{ 'gate down ' ~ e.minutes ~ ' min' if e.kind == 'down' else 'options changed: ' ~ (e.keys | join(', ')) }} ({{ as_timestamp(e.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"
+              "{% for e in state_attr('sensor.agent_gate_security_events','anomaly_events') or [] %}- {{ 'burst of ' ~ e.count ~ ' deletions, locked' if e.kind == 'anomaly_lock' else e.count ~ ' writes in a minute' }} by `{{ e.tool }}` ({{ as_timestamp(e.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"},
              _mqtt_btn("I reviewed these, clear", "mdi:shield-check", "action", "AGENT_GATE_CLEAR_HITS", "red")]}},
         {"type": "button", "name": "Scan now", "icon": "mdi:shield-search", "show_state": False,
          "tap_action": {"action": "perform-action", "perform_action": "button.press",
@@ -1739,6 +1841,8 @@ SCAN_STRINGS = {
         "f_policy_broad": ("Read-only patterns allow write tools", "{names}", "Remove patterns like * or ha_config_set_* from read_tool_patterns."),
         "f_options_changed": ("Gate options changed while it was down", "{keys} at {when}", "If that was not you, review the add-on configuration."),
         "f_downtime": ("Gate was down", "{mins} min, until {when}", "Check the add-on log; while the gate is down the lock is enforced only by the backstop automations."),
+        "f_anomaly": ("Unusual activity: burst of deletions", "{n} delete/stop calls in a minute at {when} (last: {tool}); the gate locked itself", "Review the audit log. If it was you, clear the events on the dashboard."),
+        "f_anomaly_warn": ("Unusual activity: many writes", "{n} writes in a minute at {when} (last: {tool})", "Fine while you build something; otherwise review the audit log."),
         "f_redacted": ("Secrets hidden from the agent", "{n} value(s) in 24 h, last by {tool}", "The agent asked for files or data holding credentials. Fine if you expected it; otherwise review the audit log."),
     },
     "he": {
@@ -1774,6 +1878,8 @@ SCAN_STRINGS = {
         "f_policy_broad": ("תבניות הקריאה מתירות כלי כתיבה", "{names}", "הסר תבניות כמו * או ha_config_set_* מ-read_tool_patterns."),
         "f_options_changed": ("הגדרות השער השתנו בזמן שהוא לא רץ", "{keys} ב-{when}", "אם זה לא היית אתה, בדוק את הגדרות התוסף."),
         "f_downtime": ("השער לא רץ", "{mins} דקות, עד {when}", "בדוק את לוג התוסף; כשהשער לא רץ, רק אוטומציות הגיבוי אוכפות את הנעילה."),
+        "f_anomaly": ("פעילות חריגה: פרץ מחיקות", "{n} קריאות מחיקה או עצירה בתוך דקה ב-{when} (האחרונה: {tool}); השער נעל את עצמו", "בדוק את יומן הביקורת. אם זה היית אתה, נקה את האירועים בדשבורד."),
+        "f_anomaly_warn": ("פעילות חריגה: הרבה כתיבות", "{n} כתיבות בתוך דקה ב-{when} (האחרונה: {tool})", "בסדר כשבונים משהו; אחרת בדוק את יומן הביקורת."),
         "f_redacted": ("סודות הוסתרו מהסוכן", "{n} ערכים ב-24 שעות, האחרון דרך {tool}", "הסוכן ביקש קבצים או נתונים עם פרטי גישה. בסדר אם ציפית לזה; אחרת בדוק את יומן הביקורת."),
     },
 }
@@ -1879,6 +1985,11 @@ def run_scan(source="manual"):
                                          when=fmt_local(e["ts"])))
             elif e.get("kind") == "down":
                 findings.append(_finding("warning", "f_downtime", mins=e.get("minutes"), when=fmt_local(e["ts"])))
+        for e in anomaly_events_recent():
+            if e.get("kind") == "anomaly_lock":
+                findings.append(_finding("critical", "f_anomaly", n=e.get("count"), when=fmt_local(e["ts"]), tool=e.get("tool")))
+            else:
+                findings.append(_finding("warning", "f_anomaly_warn", n=e.get("count"), when=fmt_local(e["ts"]), tool=e.get("tool")))
         reds = redactions_recent()
         if reds:
             findings.append(_finding("info", "f_redacted", n=sum(r.get("n", 0) for r in reds), tool=reds[0].get("tool")))

@@ -82,6 +82,17 @@ Two ideas borrowed from endpoint security:
   Supervisor watchdog, and read-only patterns broad enough to let write tools
   through (`*`, `ha_config_set_*` ...).
 
+## Behaviour monitor
+
+In an open window the gate counts write and delete tool calls per minute.
+Plain writes only warn (`anomaly_writes_warn_per_min`, default 60): building
+an agent or a dashboard legitimately means many writes. Deletions, removals,
+purges, uninstalls, add-on stops and delete-like service calls have no honest
+reason to come in bursts, so `anomaly_deletes_lock_per_min` of them (default
+5) closes every mechanism and notifies you. In an "until I close" window the
+thresholds double. Work over SSH or a terminal is not counted; only calls that
+pass through the gate are.
+
 ## Secrets never reach the agent
 
 Every tool result and every command output passes through the gate on its way

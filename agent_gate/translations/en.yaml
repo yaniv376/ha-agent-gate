@@ -44,6 +44,15 @@ configuration:
   destructive_patterns:
     name: Destructive command patterns
     description: Shell commands matching these regular expressions need your approval on the phone before they run.
+  anomaly_enabled:
+    name: Behaviour monitor
+    description: Watch the rate of write and delete tool calls in an open window. Many writes only warn; a burst of deletions, removals or stops locks every mechanism. Thresholds double in an "until I close" window.
+  anomaly_writes_warn_per_min:
+    name: Writes per minute that trigger a warning
+    description: 0 disables the warning.
+  anomaly_deletes_lock_per_min:
+    name: Deletions per minute that lock the gate
+    description: Counts remove/delete/purge/uninstall tools, add-on stops and delete-like service calls. 0 disables the lock.
   redact_secrets:
     name: Hide secrets from the agent
     description: Passwords, tokens, API keys and private keys in tool results and command output are replaced by a marker before they reach the agent.
