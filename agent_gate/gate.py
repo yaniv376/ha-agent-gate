@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.4.7"
+VERSION = "0.4.8"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -951,11 +951,19 @@ def actual_states():
     return out
 
 
+STOPPING_GRACE = 90  # seconds after a close during which a still-running add-on is not a deviation
+_STOPPING = {}       # mechanism key -> time.time() when its close was requested
+
+
 def compute_deviation(actual):
-    """An add-on-backed mechanism running without an open window is a deviation."""
+    """An add-on-backed mechanism running without an open window is a deviation,
+    unless its close was requested in the last STOPPING_GRACE seconds: the
+    Supervisor needs a few seconds to stop an add-on, and that is not a deviation."""
     active = active_windows()
+    now = time.time()
     return [m["key"] for m in addon_mechanisms()
-            if m["key"] not in active and actual.get(m["key"], {}).get("running")]
+            if m["key"] not in active and actual.get(m["key"], {}).get("running")
+            and now - _STOPPING.get(m["key"], 0) > STOPPING_GRACE]
 
 
 def apply_addons(keys=None):
@@ -1119,6 +1127,8 @@ def close_mechs(keys, reason="dashboard"):
         else:
             STATE["mode"] = "open"
         save_state()
+    for k in closed:
+        _STOPPING[k] = time.time()
     apply_addons(closed if closed else None)
     publish_all()
     if closed and not session_over:

@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.4.8
+- An add-on still stopping within 90 s of a close is no longer reported as a deviation (the status flashed "Deviation!" right after Lock now).
+
 ## 0.4.7
 - One-tap fixes: boot off for controlled add-ons, uninstall uncontrolled editing add-ons, update add-ons with a backup, enable the backstop automations, watchdog on. `binary_sensor.agent_gate_fix_<kind>`, MQTT `agent_gate/cmd/fix`, buttons on the ready-made dashboard.
 
