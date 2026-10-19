@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -142,9 +142,10 @@ def load_options():
 OPT = load_options()
 
 # Mechanisms that are flags inside the gate rather than add-ons.
+LANG = "he" if str(OPT.get("language") or "en").lower().startswith("he") else "en"
 BUILTIN_MECHANISMS = [
-    {"key": "ha_write", "name": "HA write (MCP)", "addons": [], "default_on": True},
-    {"key": "commands", "name": "Shell commands", "addons": [], "default_on": True},
+    {"key": "ha_write", "name": "כתיבה ב-HA" if LANG == "he" else "HA write", "addons": [], "default_on": True},
+    {"key": "commands", "name": "פקודות" if LANG == "he" else "Commands", "addons": [], "default_on": True},
 ]
 MECHANISMS = BUILTIN_MECHANISMS + [
     {"key": m.get("key"), "name": m.get("name") or m.get("key"),
@@ -286,7 +287,6 @@ def backup_skip_short():
     return bool(v)
 
 
-LANG = "he" if str(OPT.get("language") or "en").lower().startswith("he") else "en"
 STRINGS = {
     "en": {
         "title": "Agent Gate", "title_open": "Agent Gate OPEN", "title_locked": "Agent Gate LOCKED",
@@ -1423,6 +1423,19 @@ def publish_discovery():
 _LAST_ACTUAL = {}
 
 
+def _ends_text(w, dev=False):
+    """Short human text for a mechanism's window, for dashboard tiles."""
+    if dev:
+        return D("running_no_window")
+    if not w:
+        return D("closed")
+    e = parse_iso(w.get("end"))
+    if not e:
+        return D("open_until_closed")
+    mins = max(0, int((e - now_utc()).total_seconds() // 60))
+    return D("closes_in", m=mins, t=fmt_local(w.get("end")).split(" ")[-1])
+
+
 def publish_all(actual=None, deviation=None):
     global _LAST_ACTUAL
     if not MQTT_CLIENT:
@@ -1454,6 +1467,7 @@ def publish_all(actual=None, deviation=None):
                         "open": bool(w), "end": (w or {}).get("end"),
                         "until_closed": bool(w) and not (w or {}).get("end"),
                         "opened_at": (w or {}).get("opened_at"),
+                        "ends": _ends_text(w, m["key"] in deviation),
                         "deviation": m["key"] in deviation}), qos=1, retain=True)
     status = "deviation" if deviation else ("open" if open_ else ("opening" if opening else "locked"))
     pub(f"{BASE}/status/state", status, qos=1, retain=True)
@@ -1766,13 +1780,15 @@ def _nav(path):
     return {"action": "navigate", "navigation_path": path}
 
 
-def _btn(name, icon, tap, color=None, confirm=None):
-    c = {"type": "button", "name": name, "icon": icon, "show_state": False, "tap_action": dict(tap)}
-    if color:
-        c["icon_color"] = color
+def _btn(name, icon, tap, color=None, confirm=None, entity="sensor.agent_gate_status", columns=6):
+    """A compact action tile (one grid row high, like a Mushroom button). The
+    entity is only there because a tile needs one; its state is hidden."""
+    t = dict(tap)
     if confirm:
-        c["tap_action"]["confirmation"] = {"text": confirm}
-    return c
+        t["confirmation"] = {"text": confirm}
+    return {"type": "tile", "entity": entity, "name": name, "icon": icon, "color": color or "grey",
+            "hide_state": True, "tap_action": t, "icon_tap_action": t,
+            "grid_options": {"columns": columns, "rows": 1}}
 
 
 def _mqtt_tap(topic, payload):
@@ -1781,7 +1797,9 @@ def _mqtt_tap(topic, payload):
 
 
 def _row(*cards):
-    return {"type": "horizontal-stack", "cards": list(cards)}
+    """Cards side by side: in a sections grid that is just the cards with their
+    column widths; a conditional card keeps its inner tile's width."""
+    return list(cards)
 
 
 def dashboard_config():
@@ -1804,15 +1822,19 @@ def dashboard_config():
         "{% else %}## ⚪ {{ s }}{% endif %}"
         "{% set b = state_attr('" + S + "','last_backup_at') %}{% if b %}\n\n" + D("last_backup") + ": {{ as_timestamp(b) | timestamp_custom('%d/%m %H:%M') }}{% endif %}"
     )
-    top = _row({"type": "markdown", "content": status_md},
-               _btn(D("lock_now"), "mdi:lock", _mqtt_tap("cmd/close", '{"mech":"all"}'), "red"))
+    lock = _btn(D("lock_now"), "mdi:lock", _mqtt_tap("cmd/close", '{"mech":"all"}'), "red",
+                entity="button.agent_gate_lock_now", columns=4)
+    lock["grid_options"] = {"columns": 4, "rows": 2}
+    lock["vertical"] = True
+    top = [dict({"type": "markdown", "content": status_md}, grid_options={"columns": 8, "rows": 2}), lock]
     pending = {"type": "conditional",
                "conditions": [{"condition": "numeric_state", "entity": "sensor.agent_gate_pending", "above": 0}],
                "card": {"type": "vertical-stack", "cards": [
                    {"type": "markdown", "content": "**" + D("pending_title") + "**\n"
                     "{% for i in state_attr('sensor.agent_gate_pending','items') or [] %}- `{{ i.id }}` {{ i.command }}\n{% endfor %}"},
-                   _row(_btn(D("approve_latest"), "mdi:check-circle-outline", _mqtt_tap("action", "AGENT_GATE_APPROVE_LATEST"), "green"),
-                        _btn(D("reject_all"), "mdi:close-circle-outline", _mqtt_tap("action", "AGENT_GATE_REJECT_ALL"), "red"))]}}
+                   {"type": "horizontal-stack", "cards": [
+                       _btn(D("approve_latest"), "mdi:check-circle-outline", _mqtt_tap("action", "AGENT_GATE_APPROVE_LATEST"), "green", entity="sensor.agent_gate_pending"),
+                       _btn(D("reject_all"), "mdi:close-circle-outline", _mqtt_tap("action", "AGENT_GATE_REJECT_ALL"), "red", entity="sensor.agent_gate_pending")]}]}}
     ev = "sensor.agent_gate_security_events"
     events = {"type": "conditional",
               "conditions": [{"condition": "numeric_state", "entity": ev, "above": 0}],
@@ -1822,7 +1844,7 @@ def dashboard_config():
                    "{% for e in state_attr('" + ev + "','tamper_events') or [] %}- ⚠️ {% if e.kind == 'down' %}" + D("ev_down", m="{{ e.minutes }}") + "{% else %}" + D("ev_opts", k="{{ e.keys | join(', ') }}") + "{% endif %} ({{ as_timestamp(e.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"
                    "{% for e in state_attr('" + ev + "','anomaly_events') or [] %}- 🚨 {% if e.kind == 'anomaly_lock' %}" + D("ev_lock", n="{{ e.count }}") + "{% else %}" + D("ev_warn", n="{{ e.count }}") + "{% endif %} `{{ e.tool }}` ({{ as_timestamp(e.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"
                    "{% set r = state_attr('" + ev + "','redactions_24h') | int(0) %}{% if r > 0 %}- 🔒 " + D("ev_redact", n="{{ r }}") + "\n{% endif %}"},
-                  _btn(D("events_clear"), "mdi:shield-check", _mqtt_tap("action", "AGENT_GATE_CLEAR_HITS"), "red")]}}
+                  _btn(D("events_clear"), "mdi:shield-check", _mqtt_tap("action", "AGENT_GATE_CLEAR_HITS"), "red", entity=ev, columns=12)]}}
     # --- mechanisms ----------------------------------------------------------
     mech_cards = [{"type": "heading", "heading": D("mechanisms"), "icon": "mdi:door"},
                   {"type": "markdown", "text_only": True, "content": D("mech_hint")}]
@@ -1831,7 +1853,7 @@ def dashboard_config():
         k = m["key"]
         sw = f"switch.agent_gate_mech_{k}"
         mech_cards.append({"type": "tile", "entity": sw, "name": m["name"], "color": "amber",
-                           "state_content": ["state", "end"], "grid_options": {"columns": 6},
+                           "state_content": ["ends"], "grid_options": {"columns": 6},
                            "tap_action": _nav(f"{base}/mech-{k}"), "icon_tap_action": {"action": "more-info"}})
         md = ("{% set e = state_attr('" + sw + "','end') %}"
               "{% if state_attr('" + sw + "','deviation') %}" + D("is_dev") +
@@ -1839,14 +1861,14 @@ def dashboard_config():
               "{% else %}" + D("choose") + "{% endif %}")
         subviews.append({"title": m["name"], "path": f"mech-{k}", "subview": True, "back_path": home,
                          "type": "sections", "max_columns": 1, "sections": [{"type": "grid", "cards": [
-                             {"type": "tile", "entity": sw, "name": m["name"], "color": "amber", "state_content": ["state", "end"]},
+                             {"type": "tile", "entity": sw, "name": m["name"], "color": "amber", "state_content": ["ends"]},
                              {"type": "markdown", "content": md},
-                             _row(_btn(D("m15"), "mdi:timer-outline", _mqtt_tap("cmd/open", json.dumps({"mech": k, "minutes": 15})), "amber"),
-                                  _btn(D("h1"), "mdi:timer-outline", _mqtt_tap("cmd/open", json.dumps({"mech": k, "minutes": 60})), "amber")),
-                             _row(_btn(D("h3"), "mdi:timer-sand", _mqtt_tap("cmd/open", json.dumps({"mech": k, "minutes": 180})), "amber"),
-                                  _btn(D("unlimited"), "mdi:timer-off-outline", _mqtt_tap("cmd/open", json.dumps({"mech": k, "minutes": 0})), "blue")),
-                             _row(_btn(D("plus_hour_short"), "mdi:timer-plus-outline", _mqtt_tap("cmd/extend", json.dumps({"mech": k, "minutes": 60})), "blue"),
-                                  _btn(D("close"), "mdi:close-circle-outline", _mqtt_tap("cmd/close", json.dumps({"mech": k})), "red")),
+                             _btn(D("m15"), "mdi:timer-outline", _mqtt_tap("cmd/open", json.dumps({"mech": k, "minutes": 15})), "amber", entity=sw),
+                             _btn(D("h1"), "mdi:timer-outline", _mqtt_tap("cmd/open", json.dumps({"mech": k, "minutes": 60})), "amber", entity=sw),
+                             _btn(D("h3"), "mdi:timer-sand", _mqtt_tap("cmd/open", json.dumps({"mech": k, "minutes": 180})), "amber", entity=sw),
+                             _btn(D("unlimited"), "mdi:timer-off-outline", _mqtt_tap("cmd/open", json.dumps({"mech": k, "minutes": 0})), "blue", entity=sw),
+                             _btn(D("plus_hour_short"), "mdi:timer-plus-outline", _mqtt_tap("cmd/extend", json.dumps({"mech": k, "minutes": 60})), "blue", entity=sw),
+                             _btn(D("close"), "mdi:close-circle-outline", _mqtt_tap("cmd/close", json.dumps({"mech": k})), "red", entity=sw),
                          ]}]})
     # --- scan ----------------------------------------------------------------
     sc = "sensor.agent_gate_scan"
@@ -1857,43 +1879,46 @@ def dashboard_config():
                "{{ c.critical }} / {{ c.warning }} / {{ c.info }} · {{ as_timestamp(t) | timestamp_custom('%d/%m %H:%M') }}"
                "{% else %}" + D("no_scan") + "{% endif %}{% endif %}")
     scan_cards = [{"type": "heading", "heading": D("scan"), "icon": "mdi:shield-search"},
-                  _row(_btn(D("scan_now"), "mdi:shield-search", {"action": "perform-action", "perform_action": "button.press",
-                                                                  "target": {"entity_id": "button.agent_gate_scan_now"}}, "green"),
-                       _btn(D("prev_scans"), "mdi:history", _nav(f"{base}/scans"), "blue")),
+                  _btn(D("scan_now"), "mdi:shield-search", {"action": "perform-action", "perform_action": "button.press",
+                                                            "target": {"entity_id": "button.agent_gate_scan_now"}}, "green",
+                       entity="button.agent_gate_scan_now"),
+                  _btn(D("prev_scans"), "mdi:history", _nav(f"{base}/scans"), "blue", entity="sensor.agent_gate_scan"),
                   {"type": "markdown", "text_only": True, "content": scan_md}]
     for kind in FIX_KINDS:
         scan_cards.append({"type": "conditional",
                            "conditions": [{"condition": "state", "entity": f"binary_sensor.agent_gate_fix_{kind}", "state": "on"}],
                            "card": _btn(D("fix") + TS("fix_" + kind), "mdi:auto-fix", _mqtt_tap("cmd/fix", kind), "amber",
-                                        confirm=TS("fix_" + kind) + D("confirm"))})
+                                        confirm=TS("fix_" + kind) + D("confirm"), entity=f"binary_sensor.agent_gate_fix_{kind}", columns=12)})
     scan_cards += [events]
     # --- settings and shortcuts ----------------------------------------------
     upd = "update.agent_gate_update"
     settings_cards = [
         {"type": "heading", "heading": D("settings"), "icon": "mdi:cog"},
-        _row(_btn(D("backup_rem"), "mdi:backup-restore", _nav(f"{base}/settings")),
-             _btn(D("addon_page"), "mdi:puzzle-outline", _nav(f"/config/app/{SELF_SLUG}/info"))),
-        _row(_btn(D("check_updates"), "mdi:update", {"action": "perform-action", "perform_action": "homeassistant.update_entity",
-                                                      "target": {"entity_id": upd}}, "blue"),
-             {"type": "conditional", "conditions": [{"condition": "state", "entity": upd, "state": "on"}],
-              "card": _btn(D("update_gate"), "mdi:download", {"action": "perform-action", "perform_action": "update.install",
-                                                               "target": {"entity_id": upd}, "data": {"backup": True}},
-                           "green", confirm=D("update_confirm"))}),
-        _row(_btn(D("entities"), "mdi:format-list-bulleted", _nav("/config/entities?search=agent_gate")),
-             _btn(D("log"), "mdi:text-box-search-outline", _nav(f"/config/app/{SELF_SLUG}/logs"))),
-        _row(_btn(D("backups"), "mdi:folder-clock-outline", _nav("/config/backup")),
-             _btn(D("rebuild"), "mdi:view-dashboard-edit-outline", _mqtt_tap("action", "AGENT_GATE_REBUILD_DASHBOARD"),
-                  "grey", confirm=D("rebuild_confirm"))),
+        _btn(D("backup_rem"), "mdi:backup-restore", _nav(f"{base}/settings")),
+        _btn(D("addon_page"), "mdi:puzzle-outline", _nav(f"/config/app/{SELF_SLUG}/info")),
+        dict(_btn(D("check_updates"), "mdi:update", {"action": "perform-action", "perform_action": "homeassistant.update_entity",
+                                                      "target": {"entity_id": upd}}, "blue", entity=upd),
+             hide_state=False, state_content=["installed_version"]),
+        {"type": "conditional", "conditions": [{"condition": "state", "entity": upd, "state": "on"}],
+         "card": dict(_btn(D("update_gate"), "mdi:download", {"action": "perform-action", "perform_action": "update.install",
+                                                              "target": {"entity_id": upd}, "data": {"backup": True}},
+                           "green", confirm=D("update_confirm"), entity=upd),
+                      hide_state=False, state_content=["latest_version"])},
+        _btn(D("entities"), "mdi:format-list-bulleted", _nav("/config/entities?search=agent_gate")),
+        _btn(D("log"), "mdi:text-box-search-outline", _nav(f"/config/app/{SELF_SLUG}/logs")),
+        _btn(D("backups"), "mdi:folder-clock-outline", _nav("/config/backup")),
+        _btn(D("rebuild"), "mdi:view-dashboard-edit-outline", _mqtt_tap("action", "AGENT_GATE_REBUILD_DASHBOARD"),
+             "grey", confirm=D("rebuild_confirm")),
     ]
     # --- open all (bottom) -----------------------------------------------------
     open_cards = [
         {"type": "heading", "heading": D("open_all"), "icon": "mdi:lock-open-variant"},
-        {"type": "grid", "columns": 4, "square": False, "cards": [
-            _btn(D("m15"), "mdi:timer-outline", _mqtt_tap("cmd/open", '{"mech":"all","minutes":15}'), "amber"),
-            _btn(D("h1"), "mdi:timer-outline", _mqtt_tap("cmd/open", '{"mech":"all","minutes":60}'), "amber"),
-            _btn(D("h3"), "mdi:timer-sand", _mqtt_tap("cmd/open", '{"mech":"all","minutes":180}'), "amber"),
-            _btn(D("unlimited"), "mdi:timer-off-outline", _mqtt_tap("cmd/open", '{"mech":"all","minutes":0}'), "blue")]},
-        _btn(D("plus_hour"), "mdi:timer-plus-outline", _mqtt_tap("cmd/extend", '{"mech":"open","minutes":60}'), "blue"),
+        _btn(D("m15"), "mdi:timer-outline", _mqtt_tap("cmd/open", '{"mech":"all","minutes":15}'), "amber", entity="button.agent_gate_open_15"),
+        _btn(D("h1"), "mdi:timer-outline", _mqtt_tap("cmd/open", '{"mech":"all","minutes":60}'), "amber", entity="button.agent_gate_open_60"),
+        _btn(D("h3"), "mdi:timer-sand", _mqtt_tap("cmd/open", '{"mech":"all","minutes":180}'), "amber", entity="button.agent_gate_open_180"),
+        _btn(D("unlimited"), "mdi:timer-off-outline", _mqtt_tap("cmd/open", '{"mech":"all","minutes":0}'), "blue", entity="button.agent_gate_open_unlimited"),
+        _btn(D("plus_hour"), "mdi:timer-plus-outline", _mqtt_tap("cmd/extend", '{"mech":"open","minutes":60}'), "blue",
+             entity="button.agent_gate_extend_60", columns=12),
     ]
     # --- sub-views: settings, scans, scan-n ----------------------------------
     subviews.append({"title": D("backup_rem"), "path": "settings", "subview": True, "back_path": home,
@@ -1904,12 +1929,13 @@ def dashboard_config():
                              {"entity": "number.agent_gate_reminder_minutes", "name": D("reminder")}]},
                          {"type": "markdown", "content": D("policy_help")},
                          _btn(D("backup_now"), "mdi:backup-restore", {"action": "perform-action", "perform_action": "button.press",
-                                                                      "target": {"entity_id": "button.agent_gate_backup_now"}}, "blue"),
+                                                                      "target": {"entity_id": "button.agent_gate_backup_now"}}, "blue",
+                              entity="button.agent_gate_backup_now", columns=12),
                      ]}]})
-    hist = [_row({"type": "gauge", "entity": "sensor.agent_gate_security_score", "name": D("score_title"),
-                  "min": 0, "max": 100, "needle": True, "severity": {"green": 90, "yellow": 70, "red": 0}},
-                 {"type": "history-graph", "entities": [{"entity": "sensor.agent_gate_security_score", "name": D("trend")}],
-                  "hours_to_show": 168}),
+    hist = [{"type": "gauge", "entity": "sensor.agent_gate_security_score", "name": D("score_title"), "grid_options": {"columns": 5, "rows": 3},
+             "min": 0, "max": 100, "needle": True, "severity": {"green": 90, "yellow": 70, "red": 0}},
+            {"type": "history-graph", "entities": [{"entity": "sensor.agent_gate_security_score", "name": D("trend")}],
+             "hours_to_show": 168, "grid_options": {"columns": 7, "rows": 3}},
             {"type": "markdown", "text_only": True, "content": D("history_hint")}]
     for n in range(1, SCAN_SLOTS + 1):
         h = f"sensor.agent_gate_scan_h{n}"
@@ -1928,7 +1954,7 @@ def dashboard_config():
     subviews.append({"title": D("prev_scans"), "path": "scans", "subview": True, "back_path": home,
                      "type": "sections", "max_columns": 1, "sections": [{"type": "grid", "cards": hist}]})
     main = {"title": D("title"), "path": "gate", "icon": "mdi:shield-lock", "type": "sections", "max_columns": 1,
-            "sections": [{"type": "grid", "cards": [top, pending] + mech_cards + scan_cards + settings_cards + open_cards}]}
+            "sections": [{"type": "grid", "cards": top + [pending] + mech_cards + scan_cards + settings_cards + open_cards}]}
     return {"views": [main] + subviews}
 
 

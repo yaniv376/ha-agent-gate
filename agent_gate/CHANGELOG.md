@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.5.1
+- Dashboard: compact one-row tiles instead of tall button cards; mechanism tiles show "closes in N min (HH:MM)" (new `ends` attribute on the mechanism switches); built-in mechanism names follow the language (HA write / Commands).
+
 ## 0.5.0
 - Ready-made dashboard rebuilt: core cards only, phone-first single column (status and Lock now on top, mechanisms, scan with score and one-tap fixes, settings and shortcuts incl. check/update the gate, open-all buttons at the bottom), sub-views per mechanism, for settings and for the scan history, in the add-on's language. `AGENT_GATE_REBUILD_DASHBOARD` action (button under settings) resets an existing dashboard to the current layout.
 
