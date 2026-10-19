@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -823,6 +823,7 @@ def open_mechs(keys, minutes, source="dashboard"):
                 STATE["deviation_since"] = None
                 STATE["deviation_notified"] = False
                 STATE["mode"] = "opening"
+                STATE["phase"] = "check"   # check: reading the backup list; backup: a full backup runs
             wid = STATE["window_id"]
             save_state()
         publish_all()
@@ -831,11 +832,15 @@ def open_mechs(keys, minutes, source="dashboard"):
             need, why = backup_needed(minutes)
             log(f"backup before opening: {'yes' if need else 'skipped'} ({why})")
             if need:
+                with STATE_LOCK:
+                    STATE["phase"] = "backup"
+                publish_all()
                 backup = create_full_backup(f"agent_gate_{datetime.now().strftime('%Y%m%d_%H%M')}")
                 if not backup:
                     notify(T("title"), T("backup_failed"), tag="agent_gate_window")
                     with STATE_LOCK:
                         STATE["mode"] = "locked"
+                        STATE["phase"] = None
                         save_state()
                     publish_all()
                     return
@@ -847,6 +852,7 @@ def open_mechs(keys, minutes, source="dashboard"):
                 STATE["backup"] = backup
                 STATE["last_backup_at"] = iso(now_utc())
             STATE["mode"] = "open"
+            STATE["phase"] = None
             save_state()
         apply_addons(keys)
         _append_jsonl(HISTORY_PATH, {"event": "open", "window_id": wid, "ts": iso(now_utc()),
@@ -1244,7 +1250,7 @@ def publish_all(actual=None, deviation=None):
         "soonest_end": iso(soonest) if soonest else None,
         "open_mechanisms": list(windows.keys()),
         "open_names": [mech_name(k) for k in windows],
-        "backup": st.get("backup"), "deviation": deviation,
+        "backup": st.get("backup"), "deviation": deviation, "phase": st.get("phase"),
         "canary_hits_24h": len(canary_hits_recent()), "tamper_events_24h": len(tamper_events_recent()),
         "actual": {k: v.get("running") for k, v in actual.items()},
         "language": LANG,
@@ -1447,7 +1453,7 @@ def dashboard_config():
     status_md = (
         "{% set s = states('" + S + "') %}"
         "{% if s == 'locked' %}## 🟢 Locked\nNo agent access right now."
-        "{% elif s == 'opening' %}## 🟠 Opening, backup running..."
+        "{% elif s == 'opening' %}## 🟠 {{ 'Opening, backup running...' if state_attr('" + S + "','phase') == 'backup' else 'Opening, checking the last backup...' }}"
         "{% elif s == 'deviation' %}## 🔴 Deviation\n{{ state_attr('binary_sensor.agent_gate_deviation','names') | join(', ') }} "
         "is running without a window. The gate will stop it in a few minutes."
         "{% else %}## 🟠 Open: {{ state_attr('" + S + "','open_names') | join(', ') }}\n"
