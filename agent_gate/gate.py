@@ -56,7 +56,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.3.5"
+VERSION = "0.3.6"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -1434,6 +1434,8 @@ SCAN_STRINGS = {
         "f_package": ("Gate backstop automations missing", "{names}", "Copy ha/agent_gate_package.yaml to /homeassistant/packages and restart HA."),
         "f_upstream": ("Gate has no upstream MCP URL", "", "Set upstream_mcp_url in the add-on options."),
         "f_gate_ok": ("Gate", "Locked, no deviation, backstop automations present.", ""),
+        "f_uncontrolled": ("Editing add-ons outside the gate", "{names}", "Add them to a mechanism in the gate's options, or uninstall them."),
+        "f_boot_auto": ("Controlled add-ons start on boot", "{names}", "Set Start on boot off in the add-on's Info page so a reboot does not start it before the gate locks it."),
     },
     "he": {
         "sev": {"critical": "קריטי", "warning": "אזהרה", "info": "מידע", "ok": "תקין"},
@@ -1459,8 +1461,16 @@ SCAN_STRINGS = {
         "f_package": ("אוטומציות הגיבוי של השער חסרות", "{names}", "העתק את ha/agent_gate_package.yaml ל-/homeassistant/packages והפעל מחדש את HA."),
         "f_upstream": ("לשער אין כתובת MCP", "", "קבע upstream_mcp_url בהגדרות התוסף."),
         "f_gate_ok": ("השער", "נעול, אין סטייה, אוטומציות הגיבוי קיימות.", ""),
+        "f_uncontrolled": ("תוספי עריכה מחוץ לשער", "{names}", "הוסף אותם למנגנון בהגדרות השער, או הסר אותם."),
+        "f_boot_auto": ("תוספים נשלטים עולים באתחול", "{names}", "כבה 'הפעל באתחול' בדף המידע של התוסף, כדי שאתחול לא יפעיל אותו לפני שהשער נועל."),
     },
 }
+
+# Add-ons that let a person or an agent change the system from a shell, an editor
+# or a flow editor. Installed but not listed in any mechanism = a path around the gate.
+EDIT_ADDON_HINTS = ("ssh", "terminal", "vscode", "code_server", "code-server", "configurator",
+                    "file_editor", "appdaemon", "nodered", "node_red", "node-red", "portainer",
+                    "pyscript", "samba", "ftp", "sftp", "webdav")
 
 
 def TS(key, **kw):
@@ -1536,6 +1546,8 @@ def run_scan(source="manual"):
             findings.append(_finding("ok", "f_gate_ok"))
         # 2. add-ons
         unprotected, hostnet, ports, addon_updates, ssh_pw, addon_pw, tunnels = [], [], [], [], [], [], []
+        uncontrolled, boot_auto = [], []
+        controlled = {x for m in MECHANISMS for x in m["addons"]}
         try:
             code, data = _sup_request("GET", "/addons", timeout=30)
             addons = data.get("data", {}).get("addons", []) if code == 200 else []
@@ -1543,7 +1555,11 @@ def run_scan(source="manual"):
             addons = []
         for a in addons:
             slug = a.get("slug")
-            if not slug or a.get("state") != "started" and not a.get("update_available"):
+            if not slug:
+                continue
+            if slug != SELF_SLUG and slug not in controlled and any(h in slug.lower() for h in EDIT_ADDON_HINTS):
+                uncontrolled.append(a.get("name") or slug)
+            if a.get("state") != "started" and not a.get("update_available") and slug not in controlled:
                 continue
             try:
                 code, info = _sup_request("GET", f"/addons/{slug}/info", timeout=20)
@@ -1554,6 +1570,8 @@ def run_scan(source="manual"):
             running = info.get("state") == "started"
             if info.get("update_available") or a.get("update_available"):
                 addon_updates.append(f"{name} ({info.get('version')} -> {info.get('version_latest')})")
+            if slug in controlled and info.get("boot") == "auto":
+                boot_auto.append(name)
             if not running:
                 continue
             if slug != SELF_SLUG and info.get("protected") is False:
@@ -1574,6 +1592,10 @@ def run_scan(source="manual"):
                 tunnels.append(name)
         if unprotected:
             findings.append(_finding("critical", "f_protection", names=", ".join(unprotected)))
+        if uncontrolled:
+            findings.append(_finding("warning", "f_uncontrolled", names=", ".join(uncontrolled)))
+        if boot_auto:
+            findings.append(_finding("warning", "f_boot_auto", names=", ".join(boot_auto)))
         if ssh_pw:
             findings.append(_finding("warning", "f_ssh_pw", names=", ".join(ssh_pw)))
         if hostnet:

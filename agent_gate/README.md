@@ -49,8 +49,10 @@ summary: commands that ran and files changed under `/addons`,
 ## Security scan
 
 `button.agent_gate_scan_now` (also 90 s after every start and every
-`scan_interval_hours`) checks: open mechanisms and deviations, add-ons with
-protection mode off or host networking, add-ons exposing ports on the host,
+`scan_interval_hours`) checks: open mechanisms and deviations, editing add-ons
+(SSH, terminals, editors, Node-RED, Portainer, Samba ...) that are installed
+but not listed in any mechanism, controlled add-ons set to start on boot,
+add-ons with protection mode off or host networking, add-ons exposing ports on the host,
 an SSH add-on that accepts a password, remote-access tunnels, pending
 updates for Core / OS / Supervisor / add-ons, the age of the newest full
 backup, long-lived access tokens, and whether the gate's backstop
