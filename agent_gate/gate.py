@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.4.5"
+VERSION = "0.4.6"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -2178,7 +2178,9 @@ pre{{white-space:pre-wrap;background:#1c1c1c;padding:14px;border-radius:12px;fon
 function done(){{document.getElementById('ok').textContent='{copied}';}}
 if(navigator.clipboard&&window.isSecureContext){{navigator.clipboard.writeText(t).then(done);return;}}
 var ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity=0;document.body.appendChild(ta);
-ta.focus();ta.select();try{{document.execCommand('copy');done();}}catch(e){{}}document.body.removeChild(ta);}}</script>
+ta.focus();ta.select();try{{document.execCommand('copy');done();}}catch(e){{}}document.body.removeChild(ta);}}
+function rf(){{fetch('{base}/scan.txt?t='+Date.now(),{{cache:'no-store'}}).then(function(r){{return r.text()}}).then(function(x){{if(x)document.getElementById('t').textContent=x;}}).catch(function(){{}});}}
+document.addEventListener('visibilitychange',function(){{if(!document.hidden)rf();}});window.addEventListener('pageshow',rf);setInterval(rf,30000);</script>
 </body></html>"""
 
 
@@ -2420,6 +2422,10 @@ class GateHandler(http.server.BaseHTTPRequestHandler):
             sub = path[len(REPORT_PATH):].strip("/")
             if sub == "":
                 self._send_bytes(200, report_page().encode("utf-8"), "text/html; charset=utf-8")
+            elif sub == "scan.txt":
+                md = LAST_SCAN.get("markdown") or ""
+                plain = re.sub(r"\*\*(.+?)\*\*", r"\1", md).replace("\n\n", "\n")
+                self._send_bytes(200, plain.encode("utf-8"), "text/plain; charset=utf-8")
             elif sub == "scan.md":
                 self._send_bytes(200, (LAST_SCAN.get("markdown") or "").replace("\n\n", "\n").encode("utf-8"),
                                  "text/markdown; charset=utf-8", "agent_gate_scan.md")
