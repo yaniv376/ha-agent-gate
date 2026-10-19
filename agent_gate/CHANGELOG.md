@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.4
+
+- Every dashboard button now gives feedback where you are looking: the
+  "Open all" row shows the opening phase and the next close under the
+  buttons; "Scan now" says when it was ignored by the one-minute cooldown;
+  fix buttons show "Applying the fix..."; "Check updates" reloads the store
+  and reports "Checked 19:31: 0.5.4 is the latest version" (or the version
+  available); "Backup now" shows the running backup and the last backup time.
+- New action `AGENT_GATE_CHECK_UPDATES` on `agent_gate/action`.
+
 ## 0.5.3
 
 - Dashboard: the security-events card rendered empty after an options-change

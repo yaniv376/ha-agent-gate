@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.5.3"
+VERSION = "0.5.4"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -205,6 +205,7 @@ def load_state():
         base["windows"] = {k: v for k, v in (base.get("windows") or {}).items() if k in MECH_BY_KEY}
         if base.get("mode") != "opening":
             base["mode"] = "open" if base["windows"] else "locked"
+        base["busy"] = None   # transient, never valid after a restart
         return base
     except Exception:
         return default_state()
@@ -1483,6 +1484,7 @@ def publish_all(actual=None, deviation=None):
         "redactions_24h": sum(r.get("n", 0) for r in redactions_recent()),
         "last_canary_hit": (canary_hits_recent() or [{}])[0].get("ts"),
         "actual": {k: v.get("running") for k, v in actual.items()},
+        "busy": st.get("busy"), "scan_rejected_at": st.get("scan_rejected_at"), "update_check": st.get("update_check"),
         "language": LANG,
     }, ensure_ascii=False), qos=1, retain=True)
     pub(f"{BASE}/window_end/state", iso(latest) if (latest and not unlimited) else "None", qos=1, retain=True)
@@ -1581,7 +1583,32 @@ def on_mqtt_message(client, userdata, msg):
         log(f"mqtt message error: {e}")
 
 
+def set_busy(val):
+    """Transient 'working on X' flag shown on the dashboard (never persisted across restarts)."""
+    with STATE_LOCK:
+        STATE["busy"] = val
+    publish_all()
+
+
+def check_updates():
+    """Dashboard 'Check updates': reload the add-on store, read our own version
+    info and remember when we checked, so the tile can show a result."""
+    set_busy("update_check")
+    try:
+        _sup_request("POST", "/store/reload", {}, timeout=90)
+        code, me = _sup_request("GET", f"/addons/{SELF_SLUG}/info", timeout=20)
+        me = me.get("data", {}) if code == 200 else {}
+        with STATE_LOCK:
+            STATE["update_check"] = {"ts": iso(now_utc()), "installed": me.get("version"),
+                                     "latest": me.get("version_latest"), "available": bool(me.get("update_available"))}
+        ha_call_service("homeassistant", "update_entity", {"entity_id": "update.agent_gate_update"})
+    except Exception as e:
+        log(f"check updates failed: {e}")
+    set_busy(None)
+
+
 def backup_now():
+    set_busy("backup")
     slug = create_full_backup(f"agent_gate_manual_{datetime.now().strftime('%Y%m%d_%H%M')}")
     if slug:
         with STATE_LOCK:
@@ -1591,7 +1618,7 @@ def backup_now():
         notify(T("title"), T("backup_done"), tag="agent_gate_backup")
     else:
         notify(T("title"), T("backup_failed_plain"), tag="agent_gate_backup")
-    publish_all()
+    set_busy(None)
 
 
 def handle_button(obj):
@@ -1628,6 +1655,8 @@ def handle_action(payload):
         _bg(open_window, int(action.rsplit("_", 1)[1]), "phone")
     elif action == "AGENT_GATE_REBUILD_DASHBOARD":
         _bg(rebuild_dashboard)
+    elif action == "AGENT_GATE_CHECK_UPDATES":
+        _bg(check_updates)
     elif action == "AGENT_GATE_CLEAR_HITS":
         # The user reviewed the decoy hits / tamper events and acknowledges them.
         with STATE_LOCK:
@@ -1734,6 +1763,10 @@ DASH_STRINGS = {
         "backup_now": "Backup now", "backup_now_sub": "Full backup, about a minute and a half",
         "policy_help": "**always**: full backup before every open. **every_6h** / **daily**: only when the newest full backup (any source) is older than that. **never**: no backup. The agent cannot change these settings.",
         "history_hint": "Tap a date to see its report. The last five scans are kept.",
+        "scan_wait": "Scan not started: wait a minute between scans.", "fix_running": "Applying the fix...",
+        "checking": "Checking for updates...", "checked_ok": "Checked {t}: {v} is the latest version",
+        "checked_upd": "Checked {t}: {v} is available", "backing_up": "Backup running, about a minute and a half...",
+        "open_fb_locked": "Everything is locked.", "open_fb_open": "{n} open, next close {t}.", "open_fb_unl": "{n} open until you close.",
     },
     "he": {
         "title": "שער הסוכן", "status": "מצב", "lock_now": "נעל עכשיו",
@@ -1767,6 +1800,10 @@ DASH_STRINGS = {
         "backup_now": "גבה עכשיו", "backup_now_sub": "גיבוי מלא, כדקה וחצי",
         "policy_help": "**always**: גיבוי מלא לפני כל פתיחה. **every_6h** / **daily**: רק אם הגיבוי המלא האחרון (מכל מקור) ישן יותר. **never**: בלי גיבוי. הסוכן לא יכול לשנות את ההגדרות האלה.",
         "history_hint": "לחץ על תאריך כדי לראות את הדוח. נשמרות 5 הסריקות האחרונות.",
+        "scan_wait": "הסריקה לא התחילה: צריך לחכות דקה בין סריקות.", "fix_running": "מבצע את התיקון...",
+        "checking": "בודק עדכונים...", "checked_ok": "נבדק ב-{t}: {v} היא הגרסה האחרונה",
+        "checked_upd": "נבדק ב-{t}: גרסה {v} זמינה", "backing_up": "גיבוי רץ, כדקה וחצי...",
+        "open_fb_locked": "הכול נעול.", "open_fb_open": "{n} פתוחים, הסגירה הבאה {t}.", "open_fb_unl": "{n} פתוחים עד שתסגור.",
     },
 }
 
@@ -1872,7 +1909,11 @@ def dashboard_config():
                          ]}]})
     # --- scan ----------------------------------------------------------------
     sc = "sensor.agent_gate_scan"
-    scan_md = ("{% if is_state('" + sc + "','scanning') %}**" + D("scanning") + "**"
+    S0 = "sensor.agent_gate_status"
+    scan_md = ("{% set b = state_attr('" + S0 + "','busy') or '' %}{% set rj = state_attr('" + S0 + "','scan_rejected_at') %}"
+               "{% if b.startswith('fix:') %}**" + D("fix_running") + "**\n\n{% endif %}"
+               "{% if rj and (now().timestamp() - as_timestamp(rj)) < 60 and not is_state('" + sc + "','scanning') %}**" + D("scan_wait") + "**\n\n{% endif %}"
+               "{% if is_state('" + sc + "','scanning') %}**" + D("scanning") + "**"
                "{% else %}{% set c = state_attr('" + sc + "','counts') %}{% set t = state_attr('" + sc + "','ts') %}"
                "{% set s = states('sensor.agent_gate_security_score') %}{% if c %}"
                "{% if s not in ['unknown','unavailable'] %}**" + D("score", s="{{ s }}") + "** · {% endif %}"
@@ -1896,14 +1937,18 @@ def dashboard_config():
         {"type": "heading", "heading": D("settings"), "icon": "mdi:cog"},
         _btn(D("backup_rem"), "mdi:backup-restore", _nav(f"{base}/settings")),
         _btn(D("addon_page"), "mdi:puzzle-outline", _nav(f"/config/app/{SELF_SLUG}/info")),
-        dict(_btn(D("check_updates"), "mdi:update", {"action": "perform-action", "perform_action": "homeassistant.update_entity",
-                                                      "target": {"entity_id": upd}}, "blue", entity=upd),
+        dict(_btn(D("check_updates"), "mdi:update", _mqtt_tap("action", "AGENT_GATE_CHECK_UPDATES"), "blue", entity=upd),
              hide_state=False, state_content=["installed_version"]),
         {"type": "conditional", "conditions": [{"condition": "state", "entity": upd, "state": "on"}],
          "card": dict(_btn(D("update_gate"), "mdi:download", {"action": "perform-action", "perform_action": "update.install",
                                                               "target": {"entity_id": upd}, "data": {"backup": True}},
                            "green", confirm=D("update_confirm"), entity=upd),
                       hide_state=False, state_content=["latest_version"])},
+        {"type": "markdown", "text_only": True, "content":
+            "{% set b = state_attr('sensor.agent_gate_status','busy') %}{% set u = state_attr('sensor.agent_gate_status','update_check') %}"
+            "{% if b == 'update_check' %}" + D("checking") +
+            "{% elif u %}{% set t = as_timestamp(u.ts) | timestamp_custom('%H:%M') %}"
+            "{% if u.available %}" + D("checked_upd", t="{{ t }}", v="{{ u.latest }}") + "{% else %}" + D("checked_ok", t="{{ t }}", v="{{ u.installed }}") + "{% endif %}{% endif %}"},
         _btn(D("entities"), "mdi:format-list-bulleted", _nav("/config/entities?search=agent_gate")),
         _btn(D("log"), "mdi:text-box-search-outline", _nav(f"/config/app/{SELF_SLUG}/logs")),
         _btn(D("backups"), "mdi:folder-clock-outline", _nav("/config/backup")),
@@ -1919,6 +1964,13 @@ def dashboard_config():
         _btn(D("unlimited"), "mdi:timer-off-outline", _mqtt_tap("cmd/open", '{"mech":"all","minutes":0}'), "blue", entity="button.agent_gate_open_unlimited"),
         _btn(D("plus_hour"), "mdi:timer-plus-outline", _mqtt_tap("cmd/extend", '{"mech":"open","minutes":60}'), "blue",
              entity="button.agent_gate_extend_60", columns=12),
+        {"type": "markdown", "text_only": True, "content":
+            "{% set s = states('sensor.agent_gate_status') %}{% set p = state_attr('sensor.agent_gate_status','phase') %}"
+            "{% set e = state_attr('sensor.agent_gate_status','soonest_end') %}{% set n = state_attr('sensor.agent_gate_status','open_mechanisms') | count %}"
+            "{% if s == 'opening' %}**{{ '" + D("opening_backup") + "' if p == 'backup' else '" + D("opening_check") + "' }}**"
+            "{% elif s == 'open' and e %}" + D("open_fb_open", n="{{ n }}", t="{{ as_timestamp(e) | timestamp_custom('%H:%M') }}") +
+            "{% elif s == 'open' %}" + D("open_fb_unl", n="{{ n }}") +
+            "{% elif s == 'locked' %}" + D("open_fb_locked") + "{% endif %}"},
     ]
     # --- sub-views: settings, scans, scan-n ----------------------------------
     subviews.append({"title": D("backup_rem"), "path": "settings", "subview": True, "back_path": home,
@@ -1931,6 +1983,10 @@ def dashboard_config():
                          _btn(D("backup_now"), "mdi:backup-restore", {"action": "perform-action", "perform_action": "button.press",
                                                                       "target": {"entity_id": "button.agent_gate_backup_now"}}, "blue",
                               entity="button.agent_gate_backup_now", columns=12),
+                         {"type": "markdown", "text_only": True, "content":
+                             "{% if state_attr('sensor.agent_gate_status','busy') == 'backup' %}**" + D("backing_up") + "**"
+                             "{% else %}{% set b = state_attr('sensor.agent_gate_status','last_backup_at') %}{% if b %}" + D("last_backup") +
+                             ": {{ as_timestamp(b) | timestamp_custom('%d/%m %H:%M') }}{% endif %}{% endif %}"},
                      ]}]})
     hist = [{"type": "gauge", "entity": "sensor.agent_gate_security_score", "name": D("score_title"), "grid_options": {"columns": 5, "rows": 3},
              "min": 0, "max": 100, "needle": True, "severity": {"green": 90, "yellow": 70, "red": 0}},
@@ -2176,6 +2232,7 @@ def apply_fix(kind):
     if not fix:
         log(f"fix {kind}: nothing to do")
         return
+    set_busy("fix:" + kind)
     errors = []
     try:
         if kind == "boot_manual":
@@ -2209,6 +2266,7 @@ def apply_fix(kind):
         notify(TS("report_title"), TS("fix_failed", label=label, err="; ".join(errors)[:200]), tag="agent_gate_fix")
     else:
         notify(TS("report_title"), TS("fix_done", label=label), tag="agent_gate_fix")
+    set_busy(None)
     time.sleep(2)
     run_scan("fix")
 
@@ -2225,6 +2283,9 @@ def run_scan(source="manual"):
     if source == "manual" and time.time() - _LAST_SCAN_START < SCAN_COOLDOWN:
         log("scan ignored: last scan started less than a minute ago")
         SCAN_LOCK.release()
+        with STATE_LOCK:
+            STATE["scan_rejected_at"] = iso(now_utc())
+        publish_all()
         return
     _LAST_SCAN_START = time.time()
     try:
