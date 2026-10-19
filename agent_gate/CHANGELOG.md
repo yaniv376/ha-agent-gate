@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.5
+
+- A new window end shows on the dashboard immediately; before, it waited
+  until the add-ons of every mechanism had been started or checked.
+
 ## 0.5.4
 
 - Every dashboard button now gives feedback where you are looking: the
@@ -9,8 +14,6 @@
   and reports "Checked 19:31: 0.5.4 is the latest version" (or the version
   available); "Backup now" shows the running backup and the last backup time.
 - New action `AGENT_GATE_CHECK_UPDATES` on `agent_gate/action`.
-- A new window end shows on the dashboard immediately; before, it waited
-  until the add-ons of every mechanism had been started or checked.
 
 ## 0.5.3
 
