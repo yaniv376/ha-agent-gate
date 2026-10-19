@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.4.3"
+VERSION = "0.4.4"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -683,7 +683,10 @@ def tamper_check_on_start():
         prev_fp = STATE.get("options_fp") or {}
         last_alive = parse_iso(STATE.get("last_alive"))
         fp = options_fingerprint()
-        changed = sorted(k for k in set(fp) | set(prev_fp) if fp.get(k) != prev_fp.get(k))
+        # Only keys that existed before and now carry another value count. Keys
+        # that appear or disappear come from an add-on update that extends or
+        # drops options, not from someone editing the configuration.
+        changed = sorted(k for k in set(fp) & set(prev_fp) if fp[k] != prev_fp[k])
         STATE["options_fp"] = fp
         if prev_fp and changed:
             events.append({"ts": iso(now), "kind": "options_changed", "keys": changed})
