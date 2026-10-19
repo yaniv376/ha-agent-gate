@@ -1055,6 +1055,7 @@ def open_mechs(keys, minutes, source="dashboard"):
             STATE["mode"] = "open"
             STATE["phase"] = None
             save_state()
+        publish_all()   # the new end shows on the dashboard at once; starting add-ons can take a while
         apply_addons(keys)
         _append_jsonl(HISTORY_PATH, {"event": "open", "window_id": wid, "ts": iso(now_utc()),
                                      "mechanisms": keys, "minutes": minutes, "source": source,
