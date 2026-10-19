@@ -1,6 +1,6 @@
 name: "Agent Gate"
 description: "On/off access gate for AI agents: MCP write lock, shell command tool, controlled add-ons, timed windows"
-version: "0.3.9"
+version: "0.4.0"
 slug: "agent_gate"
 url: "https://github.com/yaniv376/ha-agent-gate"
 arch:
@@ -79,6 +79,10 @@ options:
     - "\\bshutdown\\b"
     - "\\bkill"
     - "\\bgit\\s+(reset|clean|checkout\\s+--|push\\s+-f)"
+  canary_enabled: true
+  canary_files:
+    - "/homeassistant/secrets_backup.yaml"
+    - "/share/agent_gate/credentials.txt"
   mechanisms:
     - key: "ssh"
       name: "SSH"
@@ -115,6 +119,9 @@ schema:
   protected_exempt_tools:
     - str?
   destructive_patterns:
+    - str?
+  canary_enabled: bool?
+  canary_files:
     - str?
   mechanisms:
     - key: str

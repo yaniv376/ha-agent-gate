@@ -44,6 +44,12 @@ configuration:
   destructive_patterns:
     name: Destructive command patterns
     description: Shell commands matching these regular expressions need your approval on the phone before they run.
+  canary_enabled:
+    name: Decoy files (honeypot)
+    description: Plant decoy "secrets" files. Any tool call or command that touches one is refused, every mechanism closes at once, and you get a notification.
+  canary_files:
+    name: Decoy file paths
+    description: Where to place the decoys. Use names that look valuable and that no real task needs.
   mechanisms:
     name: Mechanisms
     description: Each entry is an access path the gate controls (key, display name, the add-ons it starts and stops, and whether a full window includes it).

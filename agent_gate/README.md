@@ -64,6 +64,24 @@ to `/share/agent_gate/scan_latest.md` and `.json`, and served on the LAN at
 the `report_url` attribute (a page with "Copy to clipboard" and download
 buttons; the link is printed in the add-on log).
 
+## Decoys and tamper protection
+
+Two ideas borrowed from endpoint security:
+
+- **Decoys (honeypot).** On start the gate plants files that look like secret
+  backups (`canary_files`, default `/homeassistant/secrets_backup.yaml` and
+  `/share/agent_gate/credentials.txt`) containing a fake token. No legitimate
+  task ever needs them. Any MCP tool call or shell command that mentions a
+  decoy path or the fake token is refused, **every mechanism is closed at
+  once**, the hit is logged (`/data/canary_hits.jsonl`) and you get a phone
+  notification. The scan reports hits of the last 24 h as critical.
+- **Tamper protection.** The gate writes a heartbeat every 30 s. On start it
+  reports if it was down for more than 2 minutes (nothing enforced the lock
+  meanwhile) and if its own options changed while it was down. The scan also
+  flags backstop automations that exist but are *disabled*, a switched-off
+  Supervisor watchdog, and read-only patterns broad enough to let write tools
+  through (`*`, `ha_config_set_*` ...).
+
 ## Destructive commands
 
 `gate_run_command` holds any command matching `destructive_patterns` and sends

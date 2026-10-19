@@ -29,6 +29,7 @@ Layout of this file:
 """
 
 import fnmatch
+import hashlib
 import http.client
 import http.server
 import json
@@ -56,7 +57,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.3.9"
+VERSION = "0.4.0"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -117,6 +118,8 @@ def load_options():
         "protected_patterns": ["agent_gate"],
         "destructive_patterns": [],
         "mechanisms": [],
+        "canary_enabled": True,
+        "canary_files": ["/homeassistant/secrets_backup.yaml", "/share/agent_gate/credentials.txt"],
     }
     try:
         with open(OPTIONS_PATH, encoding="utf-8") as f:
@@ -294,6 +297,11 @@ STRINGS = {
         "btn_stop_now": "Stop it now",
         "approve_title": "Agent Gate: approve command?", "btn_approve": "Approve", "btn_reject": "Reject",
         "approve_hint": "Approve or reject with the buttons on the phone notification or on the Agent Gate dashboard.",
+        "canary_title": "Agent Gate: TRAP TRIPPED, locked",
+        "canary_body": "{what} touched a decoy ({where}). Nothing real was exposed. Every mechanism was closed. Review the agent's recent actions before opening again.",
+        "tamper_title": "Agent Gate: tamper warning",
+        "tamper_options": "The gate's options changed while it was down: {keys}. If that was not you, review the add-on configuration.",
+        "tamper_down": "The gate was not running for {mins} min (until {until}). During that time nothing enforced the lock.",
     },
     "he": {
         "title": "שער הסוכן", "title_open": "שער הסוכן פתוח", "title_locked": "שער הסוכן נעול",
@@ -309,6 +317,11 @@ STRINGS = {
         "btn_stop_now": "עצור עכשיו",
         "approve_title": "שער הסוכן: לאשר פקודה?", "btn_approve": "אשר", "btn_reject": "דחה",
         "approve_hint": "אישור או דחייה בכפתורים שבהתראת הטלפון או בדשבורד של השער.",
+        "canary_title": "שער הסוכן: המלכודת הופעלה, ננעל",
+        "canary_body": "{what} נגע בפיתיון ({where}). שום דבר אמיתי לא נחשף. כל המנגנונים נסגרו. בדוק את הפעולות האחרונות של הסוכן לפני פתיחה מחדש.",
+        "tamper_title": "שער הסוכן: אזהרת חבלה",
+        "tamper_options": "הגדרות השער השתנו בזמן שהוא לא רץ: {keys}. אם זה לא היית אתה, בדוק את הגדרות התוסף.",
+        "tamper_down": "השער לא רץ במשך {mins} דקות (עד {until}). בזמן הזה שום דבר לא אכף את הנעילה.",
     },
 }
 
@@ -553,8 +566,145 @@ def audit(entry):
     _append_jsonl(AUDIT_PATH, entry)
 
 
+# --------------------------------------------------------------------------
+# 3b. honeypot (decoy files and a decoy token) and tamper protection
+#
+# A decoy is something no legitimate task ever needs: a file that looks like a
+# secrets backup, and a token string inside it. Any tool call or shell command
+# that mentions a decoy path or the decoy token is denied, every mechanism is
+# closed at once, and the hit is kept for the scan and the phone.
+# --------------------------------------------------------------------------
+CANARY_ENABLED = bool(OPT.get("canary_enabled", True))
+CANARY_FILES = [str(p) for p in (OPT.get("canary_files") or []) if p]
+CANARY_TOKEN_PATH = os.path.join(DATA_DIR, "canary_token")
+CANARY_TOKEN = _file_token(CANARY_TOKEN_PATH) if CANARY_ENABLED else ""
+CANARY_MARK = "agent_gate_canary"
+CANARY_HITS_PATH = os.path.join(DATA_DIR, "canary_hits.jsonl")
+CANARY_LOCK = threading.Lock()
+
+
+def _canary_content(path):
+    name = os.path.basename(path)
+    if name.endswith((".yaml", ".yml")):
+        return (f"# {name} - do not share\n"
+                f"ha_long_lived_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.{CANARY_TOKEN}\n"
+                f"wifi_password: {CANARY_MARK}_{CANARY_TOKEN[:8]}\n"
+                f"mqtt_password: {CANARY_TOKEN[8:24]}\n")
+    return (f"{name}\nHOME ASSISTANT TOKEN={CANARY_TOKEN}\nROUTER ADMIN PASSWORD={CANARY_MARK}_{CANARY_TOKEN[:8]}\n")
+
+
+def place_canaries():
+    """Create the decoy files (only where the parent directory exists)."""
+    if not CANARY_ENABLED:
+        return
+    for path in CANARY_FILES:
+        try:
+            d = os.path.dirname(path)
+            if not os.path.isdir(d):
+                os.makedirs(d, exist_ok=True)
+            if not os.path.exists(path) or CANARY_TOKEN not in open(path, encoding="utf-8", errors="replace").read():
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(_canary_content(path))
+        except Exception as e:
+            log(f"canary {path}: {e}")
+
+
+def canary_match(text):
+    """Return what was matched (path or 'token') if the text touches a decoy."""
+    if not CANARY_ENABLED or not text:
+        return None
+    low = text.lower()
+    if CANARY_TOKEN and CANARY_TOKEN.lower() in low:
+        return "token"
+    for path in CANARY_FILES:
+        base = os.path.basename(path).lower()
+        # Full path, or the bare file name: ha_read_file / ha_write_file take
+        # paths relative to the config dir, and shells use relative paths too.
+        if path.lower() in low or (len(base) >= 12 and base in low):
+            return path
+    return None
+
+
+def trip_canary(what, where, preview=""):
+    """Deny + lock everything + remember + tell the user."""
+    hit = {"ts": iso(now_utc()), "what": what, "where": where, "preview": preview[:200]}
+    _append_jsonl(CANARY_HITS_PATH, hit)
+    with CANARY_LOCK:
+        with STATE_LOCK:
+            hits = STATE.setdefault("canary_hits", [])
+            hits.insert(0, hit)
+            del hits[20:]
+            save_state()
+    log(f"CANARY TRIPPED by {what} on {where}")
+    audit({"tool": what, "decision": "deny", "reason": f"canary: {where}", "mode": STATE["mode"],
+           "window_id": STATE.get("window_id"), "args_preview": preview[:300]})
+    _bg(lock_window, "canary")
+    notify(T("canary_title"), T("canary_body", what=what, where=where), tag="agent_gate_canary")
+    _bg(publish_all)
+
+
+def canary_hits_recent(hours=24):
+    cutoff = now_utc() - timedelta(hours=hours)
+    with STATE_LOCK:
+        hits = list(STATE.get("canary_hits") or [])
+    return [h for h in hits if parse_iso(h.get("ts")) and parse_iso(h["ts"]) >= cutoff]
+
+
+def options_fingerprint():
+    """Hash of the add-on options as saved by the Supervisor (what the user can edit)."""
+    try:
+        with open(OPTIONS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+    keys = {k: hashlib.sha256(json.dumps(v, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:12]
+            for k, v in data.items()}
+    return keys
+
+
+def tamper_check_on_start():
+    """Runs once on start: did the options change while the gate was down, and
+    how long was it down? Both are remembered for the scan and reported."""
+    now = now_utc()
+    events = []
+    with STATE_LOCK:
+        prev_fp = STATE.get("options_fp") or {}
+        last_alive = parse_iso(STATE.get("last_alive"))
+        fp = options_fingerprint()
+        changed = sorted(k for k in set(fp) | set(prev_fp) if fp.get(k) != prev_fp.get(k))
+        STATE["options_fp"] = fp
+        if prev_fp and changed:
+            events.append({"ts": iso(now), "kind": "options_changed", "keys": changed})
+        if last_alive and (now - last_alive) > timedelta(minutes=2):
+            mins = int((now - last_alive).total_seconds() // 60)
+            events.append({"ts": iso(now), "kind": "down", "minutes": mins, "until": iso(now)})
+        STATE["last_alive"] = iso(now)
+        tl = STATE.setdefault("tamper_events", [])
+        for e in events:
+            tl.insert(0, e)
+        del tl[20:]
+        save_state()
+    for e in events:
+        if e["kind"] == "options_changed":
+            notify(T("tamper_title"), T("tamper_options", keys=", ".join(e["keys"])), tag="agent_gate_tamper")
+        else:
+            notify(T("tamper_title"), T("tamper_down", mins=e["minutes"], until=fmt_local(e["until"])),
+                   tag="agent_gate_tamper")
+
+
+def tamper_events_recent(hours=24):
+    cutoff = now_utc() - timedelta(hours=hours)
+    with STATE_LOCK:
+        ev = list(STATE.get("tamper_events") or [])
+    return [e for e in ev if parse_iso(e.get("ts")) and parse_iso(e["ts"]) >= cutoff]
+
+
 def evaluate_tool_call(name, arguments):
     """Returns (decision, reason). decision in {'allow','deny','local'}."""
+    hit = canary_match(json.dumps(arguments or {}, ensure_ascii=False))
+    if hit:
+        trip_canary(name, hit, json.dumps(arguments or {}, ensure_ascii=False))
+        return "deny", "that is a decoy; the gate has been locked and the user notified"
     if name in GATE_TOOL_NAMES:
         return "local", "gate tool"
     if is_read_tool(name):
@@ -859,6 +1009,9 @@ def timer_loop():
                     save_state()
             if time.time() - last_actual_pub >= 30:
                 last_actual_pub = time.time()
+                with STATE_LOCK:
+                    STATE["last_alive"] = iso(now)
+                    save_state()
                 actual = actual_states()
                 dev = compute_deviation(actual)
                 handle_deviation(dev)
@@ -1092,6 +1245,7 @@ def publish_all(actual=None, deviation=None):
         "open_mechanisms": list(windows.keys()),
         "open_names": [mech_name(k) for k in windows],
         "backup": st.get("backup"), "deviation": deviation,
+        "canary_hits_24h": len(canary_hits_recent()), "tamper_events_24h": len(tamper_events_recent()),
         "actual": {k: v.get("running") for k, v in actual.items()},
         "language": LANG,
     }, ensure_ascii=False), qos=1, retain=True)
@@ -1452,6 +1606,13 @@ SCAN_STRINGS = {
         "f_gate_ok": ("Gate", "Locked, no deviation, backstop automations present.", ""),
         "f_uncontrolled": ("Editing add-ons outside the gate", "{names}", "Add them to a mechanism in the gate's options, or uninstall them."),
         "f_boot_auto": ("Controlled add-ons start on boot", "{names}", "Set Start on boot off in the add-on's Info page so a reboot does not start it before the gate locks it."),
+        "f_canary": ("Decoy touched (trap tripped)", "{n} hit(s) in 24 h, last: {what} on {where} at {when}", "Review the agent's recent actions (audit log) before opening a window again."),
+        "f_canary_ok": ("Decoys in place", "{n} decoy file(s), no hits in 24 h.", ""),
+        "f_package_off": ("Gate backstop automations disabled", "{names}", "Enable them (Settings, Automations); the gate relies on them when it is down."),
+        "f_watchdog": ("Gate watchdog is off", "", "Turn on Watchdog in the add-on's Info page so the Supervisor restarts the gate if it crashes."),
+        "f_policy_broad": ("Read-only patterns allow write tools", "{names}", "Remove patterns like * or ha_config_set_* from read_tool_patterns."),
+        "f_options_changed": ("Gate options changed while it was down", "{keys} at {when}", "If that was not you, review the add-on configuration."),
+        "f_downtime": ("Gate was down", "{mins} min, until {when}", "Check the add-on log; while the gate is down the lock is enforced only by the backstop automations."),
     },
     "he": {
         "sev": {"critical": "קריטי", "warning": "אזהרה", "info": "מידע", "ok": "תקין"},
@@ -1479,6 +1640,13 @@ SCAN_STRINGS = {
         "f_gate_ok": ("השער", "נעול, אין סטייה, אוטומציות הגיבוי קיימות.", ""),
         "f_uncontrolled": ("תוספי עריכה מחוץ לשער", "{names}", "הוסף אותם למנגנון בהגדרות השער, או הסר אותם."),
         "f_boot_auto": ("תוספים נשלטים עולים באתחול", "{names}", "כבה 'הפעל באתחול' בדף המידע של התוסף, כדי שאתחול לא יפעיל אותו לפני שהשער נועל."),
+        "f_canary": ("נגיעה בפיתיון (המלכודת הופעלה)", "{n} פעמים ב-24 שעות, האחרונה: {what} על {where} ב-{when}", "בדוק את הפעולות האחרונות של הסוכן (יומן הביקורת) לפני שתפתח חלון שוב."),
+        "f_canary_ok": ("הפיתיונות במקום", "{n} קבצי פיתיון, אין נגיעות ב-24 שעות.", ""),
+        "f_package_off": ("אוטומציות הגיבוי של השער מושבתות", "{names}", "הפעל אותן (הגדרות, אוטומציות); השער נשען עליהן כשהוא לא רץ."),
+        "f_watchdog": ("השמירה האוטומטית של השער כבויה", "", "הדלק Watchdog בדף המידע של התוסף, כדי שה-Supervisor יפעיל את השער מחדש אם הוא קורס."),
+        "f_policy_broad": ("תבניות הקריאה מתירות כלי כתיבה", "{names}", "הסר תבניות כמו * או ha_config_set_* מ-read_tool_patterns."),
+        "f_options_changed": ("הגדרות השער השתנו בזמן שהוא לא רץ", "{keys} ב-{when}", "אם זה לא היית אתה, בדוק את הגדרות התוסף."),
+        "f_downtime": ("השער לא רץ", "{mins} דקות, עד {when}", "בדוק את לוג התוסף; כשהשער לא רץ, רק אוטומציות הגיבוי אוכפות את הנעילה."),
     },
 }
 
@@ -1550,14 +1718,48 @@ def run_scan(source="manual"):
         # backstop automations
         try:
             code, states = _sup_request("GET", "/core/api/states", timeout=30)
-            ids = {s.get("entity_id") for s in (states if isinstance(states, list) else [])}
+            st_by_id = {s.get("entity_id"): s.get("state") for s in (states if isinstance(states, list) else [])}
+            ids = set(st_by_id)
         except Exception:
-            ids = set()
-        missing = [a for a in ("automation.agent_gate_guard_when_gate_is_offline",
-                               "automation.agent_gate_guard_on_long_deviation",
-                               "automation.agent_gate_relay_phone_actions") if ids and a not in ids]
+            st_by_id, ids = {}, set()
+        backstop = ("automation.agent_gate_guard_when_gate_is_offline",
+                    "automation.agent_gate_guard_on_long_deviation",
+                    "automation.agent_gate_relay_phone_actions")
+        missing = [a for a in backstop if ids and a not in ids]
         if missing:
             findings.append(_finding("warning", "f_package", names=", ".join(missing)))
+        disabled = [a for a in backstop if st_by_id.get(a) == "off"]
+        if disabled:
+            findings.append(_finding("critical", "f_package_off", names=", ".join(disabled)))
+        # tamper protection: policy, watchdog, downtime, option changes, decoys
+        write_like = ("ha_config_set_*", "ha_call_service", "ha_set_*", "ha_remove_*", "ha_delete_*",
+                      "ha_write_file", "ha_manage_*", "ha_restart")
+        broad = [p for p in READ_PATTERNS if p in ("*", "ha_*", "ha_config_*")
+                 or any(fnmatch.fnmatchcase(w.replace("*", "x"), p) for w in write_like)]
+        if broad:
+            findings.append(_finding("critical", "f_policy_broad", names=", ".join(broad)))
+        try:
+            code, me = _sup_request("GET", f"/addons/{SELF_SLUG}/info", timeout=20)
+            me = me.get("data", {}) if code == 200 else {}
+            if me and me.get("watchdog") is False:
+                findings.append(_finding("warning", "f_watchdog"))
+        except Exception:
+            pass
+        for e in tamper_events_recent():
+            if e.get("kind") == "options_changed":
+                findings.append(_finding("info", "f_options_changed", keys=", ".join(e.get("keys") or []),
+                                         when=fmt_local(e["ts"])))
+            elif e.get("kind") == "down":
+                findings.append(_finding("warning", "f_downtime", mins=e.get("minutes"), when=fmt_local(e["ts"])))
+        if CANARY_ENABLED:
+            hits = canary_hits_recent()
+            if hits:
+                h = hits[0]
+                findings.append(_finding("critical", "f_canary", n=len(hits), what=h.get("what"),
+                                         where=h.get("where"), when=fmt_local(h["ts"])))
+            else:
+                place_canaries()
+                findings.append(_finding("ok", "f_canary_ok", n=len(CANARY_FILES)))
         if not windows and not dev and not missing and UPSTREAM.hostname:
             findings.append(_finding("ok", "f_gate_ok"))
         # 2. add-ons
@@ -2135,6 +2337,10 @@ def run_gate_tool(name, args):
     command = (args.get("command") or "").strip()
     if not command:
         return tool_text("command is required", True)
+    hit = canary_match(command)
+    if hit:
+        trip_canary("gate_run_command", hit, command)
+        return tool_text("DENIED: that is a decoy; the gate has been locked and the user notified.", True)
     if touches_protected({"c": command}):
         return tool_text("DENIED: command touches the gate itself.", True)
     try:
@@ -2183,6 +2389,8 @@ def main():
     if SUPERVISOR_TOKEN:
         enforce_on_start()
         threading.Thread(target=ensure_dashboard, daemon=True).start()
+    place_canaries()
+    tamper_check_on_start()
     publish_all(actual=actual_states() if SUPERVISOR_TOKEN else {})
     threading.Thread(target=timer_loop, daemon=True).start()
     if SUPERVISOR_TOKEN:
