@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.5.0
+- Ready-made dashboard rebuilt: core cards only, phone-first single column (status and Lock now on top, mechanisms, scan with score and one-tap fixes, settings and shortcuts incl. check/update the gate, open-all buttons at the bottom), sub-views per mechanism, for settings and for the scan history, in the add-on's language. `AGENT_GATE_REBUILD_DASHBOARD` action (button under settings) resets an existing dashboard to the current layout.
+
 ## 0.4.8
 - An add-on still stopping within 90 s of a close is no longer reported as a deviation (the status flashed "Deviation!" right after Lock now).
 

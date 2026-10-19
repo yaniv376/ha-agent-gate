@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.4.8"
+VERSION = "0.5.0"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -1612,6 +1612,8 @@ def handle_action(payload):
         extend_window(int(action.rsplit("_", 1)[1]))
     elif action.startswith("AGENT_GATE_OPEN_"):
         _bg(open_window, int(action.rsplit("_", 1)[1]), "phone")
+    elif action == "AGENT_GATE_REBUILD_DASHBOARD":
+        _bg(rebuild_dashboard)
     elif action == "AGENT_GATE_CLEAR_HITS":
         # The user reviewed the decoy hits / tamper events and acknowledges them.
         with STATE_LOCK:
@@ -1685,109 +1687,266 @@ def _mqtt_btn(name, icon, topic, payload, color=None):
     return c
 
 
+DASH_STRINGS = {
+    "en": {
+        "title": "Agent Gate", "status": "Status", "lock_now": "Lock now",
+        "locked": "Locked", "locked_sub": "No agent access right now",
+        "opening_check": "Opening, checking the last backup...", "opening_backup": "Opening, backup running...",
+        "deviation": "Deviation!", "deviation_sub": "{names} running without a window. The gate stops it in a few minutes.",
+        "open_n": "Open: {n} mechanisms", "next_close": "Next close in {m} min ({t})", "until_closed": "Open until you close it",
+        "last_backup": "Last backup", "pending_title": "Commands waiting for your approval",
+        "approve_latest": "Approve newest", "reject_all": "Reject all",
+        "events_title": "Security events in the last 24 h", "events_clear": "I reviewed these, clear",
+        "ev_trap": "trap: `{what}` touched `{where}`", "ev_down": "gate down {m} min", "ev_opts": "options changed: {k}",
+        "ev_lock": "burst of {n} deletions, locked", "ev_warn": "{n} writes in a minute", "ev_redact": "{n} secrets hidden from the agent",
+        "mechanisms": "Mechanisms", "mech_hint": "Tap a card to open it for a duration you choose. Tap the icon for details.",
+        "closes_in": "closes in {m} min ({t})", "open_until_closed": "open until you close it", "closed": "closed", "running_no_window": "running without a window!",
+        "scan": "Security scan", "scan_now": "Scan now", "scanning": "Scanning...", "no_scan": "Not scanned yet",
+        "score": "Score {s}/100", "prev_scans": "Previous scans", "prev_scans_sub": "Full report and history",
+        "score_title": "Security score", "trend": "7 days", "report": "Scan report", "copy_report": "Copy or download the report",
+        "scan_n": "Scan {n}", "no_data": "No data", "fix": "Fix: ", "confirm": "?",
+        "settings": "Settings and shortcuts", "backup_rem": "Backup and reminders", "backup_rem_sub": "Backup policy, reminders",
+        "addon_page": "Add-on page", "addon_page_sub": "Options, log, version", "check_updates": "Check for updates",
+        "installed": "installed {v}", "new_version": "New version available", "update_gate": "Update the gate",
+        "update_confirm": "Update Agent Gate? A backup of the add-on is made first.",
+        "entities": "Gate entities", "log": "Gate log", "backups": "Backups", "backups_sub": "Restore a previous version",
+        "rebuild": "Rebuild this dashboard", "rebuild_sub": "Reset it to the add-on's current layout",
+        "rebuild_confirm": "Replace this dashboard with the add-on's layout? Your edits to it are lost.",
+        "open_all": "Open all", "m15": "15 min", "h1": "1 hour", "h3": "3 hours", "unlimited": "Until I close",
+        "plus_hour": "+1 hour to everything open", "plus_hour_short": "+1 hour", "close": "Close now",
+        "opening_short": "opening...", "until_s": "until you close it", "until_t": "until {t}", "choose": "Closed. Choose how long to open:",
+        "is_open": "**Open** {until}. Tapping a duration sets a new end from now.", "is_dev": "**Running without a window.** Open a window to keep it, or close it.",
+        "backup_policy": "Backup before opening", "skip_short": "No backup for windows up to {n} min", "reminder": "Remind me every (min)",
+        "backup_now": "Backup now", "backup_now_sub": "Full backup, about a minute and a half",
+        "policy_help": "**always**: full backup before every open. **every_6h** / **daily**: only when the newest full backup (any source) is older than that. **never**: no backup. The agent cannot change these settings.",
+        "history_hint": "Tap a date to see its report. The last five scans are kept.",
+    },
+    "he": {
+        "title": "שער הסוכן", "status": "מצב", "lock_now": "נעל עכשיו",
+        "locked": "נעול", "locked_sub": "אין גישה לסוכן",
+        "opening_check": "נפתח, בודק גיבוי…", "opening_backup": "נפתח, מגבה…",
+        "deviation": "סטייה!", "deviation_sub": "{names} רץ בלי חלון. השער יעצור אותו בעוד כמה דקות.",
+        "open_n": "פתוח: {n} מנגנונים", "next_close": "הקרוב נסגר בעוד {m} דק׳ ({t})", "until_closed": "פתוח עד שתסגור",
+        "last_backup": "גיבוי", "pending_title": "פקודות שממתינות לאישור שלך",
+        "approve_latest": "אשר את האחרונה", "reject_all": "דחה הכול",
+        "events_title": "אירועי אבטחה ב-24 השעות האחרונות", "events_clear": "בדקתי, נקה את האירועים",
+        "ev_trap": "מלכודת: `{what}` נגע ב-`{where}`", "ev_down": "השער לא רץ {m} דק׳", "ev_opts": "הגדרות השתנו: {k}",
+        "ev_lock": "פרץ של {n} מחיקות, ננעל", "ev_warn": "{n} כתיבות בדקה", "ev_redact": "{n} סודות הוסתרו מהסוכן",
+        "mechanisms": "מנגנונים", "mech_hint": "לחיצה על כרטיס פותחת אותו לזמן שתבחר. לחיצה על האייקון מציגה פרטים.",
+        "closes_in": "נסגר בעוד {m} דק׳ ({t})", "open_until_closed": "פתוח עד שתסגור", "closed": "סגור", "running_no_window": "רץ בלי חלון!",
+        "scan": "סריקת אבטחה", "scan_now": "סרוק עכשיו", "scanning": "סורק…", "no_scan": "עדיין לא נסרק",
+        "score": "ציון {s}/100", "prev_scans": "סריקות קודמות", "prev_scans_sub": "הדוח המלא וההיסטוריה",
+        "score_title": "ציון אבטחה", "trend": "7 ימים", "report": "דוח סריקה", "copy_report": "העתק או הורד את הדוח",
+        "scan_n": "סריקה {n}", "no_data": "אין נתונים", "fix": "תקן: ", "confirm": "?",
+        "settings": "הגדרות וקיצורי דרך", "backup_rem": "גיבוי ותזכורות", "backup_rem_sub": "מדיניות גיבוי, תזכורות",
+        "addon_page": "עמוד התוסף", "addon_page_sub": "הגדרות, לוג, גרסה", "check_updates": "בדוק עדכונים",
+        "installed": "מותקנת {v}", "new_version": "יש גרסה חדשה", "update_gate": "עדכן את השער",
+        "update_confirm": "לעדכן את Agent Gate? ייווצר גיבוי של התוסף לפני העדכון.",
+        "entities": "ישויות השער", "log": "לוג השער", "backups": "גיבויים", "backups_sub": "שחזור גרסה קודמת",
+        "rebuild": "בנה מחדש את הדשבורד", "rebuild_sub": "החזרה לפריסה הנוכחית של התוסף",
+        "rebuild_confirm": "להחליף את הדשבורד בפריסה של התוסף? העריכות שלך בו יאבדו.",
+        "open_all": "פתח הכול", "m15": "15 דק׳", "h1": "שעה", "h3": "3 שעות", "unlimited": "עד שאסגור",
+        "plus_hour": "+ שעה לכל מה שפתוח", "plus_hour_short": "+ שעה", "close": "סגור עכשיו",
+        "opening_short": "נפתח…", "until_s": "עד שתסגור", "until_t": "עד {t}", "choose": "סגור. בחר לכמה זמן לפתוח:",
+        "is_open": "**פתוח** {until}. לחיצה על משך קובעת זמן חדש מעכשיו.", "is_dev": "**רץ עכשיו בלי חלון.** פתח חלון כדי להשאיר אותו, או סגור.",
+        "backup_policy": "גיבוי לפני פתיחה", "skip_short": "בלי גיבוי לחלונות של עד {n} דק׳", "reminder": "תזכורת כל (דקות)",
+        "backup_now": "גבה עכשיו", "backup_now_sub": "גיבוי מלא, כדקה וחצי",
+        "policy_help": "**always**: גיבוי מלא לפני כל פתיחה. **every_6h** / **daily**: רק אם הגיבוי המלא האחרון (מכל מקור) ישן יותר. **never**: בלי גיבוי. הסוכן לא יכול לשנות את ההגדרות האלה.",
+        "history_hint": "לחץ על תאריך כדי לראות את הדוח. נשמרות 5 הסריקות האחרונות.",
+    },
+}
+
+
+def D(key, **kw):
+    v = DASH_STRINGS.get(LANG, DASH_STRINGS["en"]).get(key) or DASH_STRINGS["en"].get(key, key)
+    return v.format(**kw) if kw else v
+
+
+def _nav(path):
+    return {"action": "navigate", "navigation_path": path}
+
+
+def _btn(name, icon, tap, color=None, confirm=None):
+    c = {"type": "button", "name": name, "icon": icon, "show_state": False, "tap_action": dict(tap)}
+    if color:
+        c["icon_color"] = color
+    if confirm:
+        c["tap_action"]["confirmation"] = {"text": confirm}
+    return c
+
+
+def _mqtt_tap(topic, payload):
+    return {"action": "perform-action", "perform_action": "mqtt.publish",
+            "data": {"topic": f"{BASE}/{topic}", "payload": payload}}
+
+
+def _row(*cards):
+    return {"type": "horizontal-stack", "cards": list(cards)}
+
+
 def dashboard_config():
+    """The ready-made dashboard: core Home Assistant cards only (works on every
+    install), one phone-first column, sub-views instead of pop-ups, and the
+    add-on's language."""
     S = "sensor.agent_gate_status"
+    base = f"/{DASHBOARD_URL}"
+    home = f"{base}/gate"
+    # --- status + lock -----------------------------------------------------
     status_md = (
-        "{% set s = states('" + S + "') %}"
-        "{% if s == 'locked' %}## 🟢 Locked\nNo agent access right now."
-        "{% elif s == 'opening' %}## 🟠 {{ 'Opening, backup running...' if state_attr('" + S + "','phase') == 'backup' else 'Opening, checking the last backup...' }}"
-        "{% elif s == 'deviation' %}## 🔴 Deviation\n{{ state_attr('binary_sensor.agent_gate_deviation','names') | join(', ') }} "
-        "is running without a window. The gate will stop it in a few minutes."
-        "{% else %}## 🟠 Open: {{ state_attr('" + S + "','open_names') | join(', ') }}\n"
-        "{% set e = state_attr('" + S + "','soonest_end') %}"
-        "{% if e %}Next close in {{ ((as_timestamp(e) - now().timestamp()) / 60) | int }} min"
-        "{% else %}Open until you close it{% endif %}{% endif %}"
-        "{% set b = state_attr('" + S + "','last_backup_at') %}\n\n"
-        "{% if b %}Last backup: {{ as_timestamp(b) | timestamp_custom('%d/%m %H:%M') }}{% endif %}"
-        "{% set p = states('sensor.agent_gate_pending') | int(0) %}{% if p > 0 %} · **{{ p }} command(s) waiting for your approval**{% endif %}"
+        "{% set s = states('" + S + "') %}{% set e = state_attr('" + S + "','soonest_end') %}"
+        "{% if s == 'locked' %}## 🟢 " + D("locked") + "\n" + D("locked_sub") +
+        "{% elif s == 'opening' %}## 🟠 {{ '" + D("opening_backup") + "' if state_attr('" + S + "','phase') == 'backup' else '" + D("opening_check") + "' }}"
+        "{% elif s == 'deviation' %}## 🔴 " + D("deviation") + "\n" +
+        D("deviation_sub", names="{{ state_attr('binary_sensor.agent_gate_deviation','names') | join(', ') }}") +
+        "{% elif s == 'open' %}## 🟠 " + D("open_n", n="{{ state_attr('" + S + "','open_mechanisms') | count }}") + "\n"
+        "{% if e %}" + D("next_close", m="{{ ((as_timestamp(e) - now().timestamp()) / 60) | int }}", t="{{ as_timestamp(e) | timestamp_custom('%H:%M') }}") +
+        "{% else %}" + D("until_closed") + "{% endif %}"
+        "{% else %}## ⚪ {{ s }}{% endif %}"
+        "{% set b = state_attr('" + S + "','last_backup_at') %}{% if b %}\n\n" + D("last_backup") + ": {{ as_timestamp(b) | timestamp_custom('%d/%m %H:%M') }}{% endif %}"
     )
-    open_all = [
-        {"type": "horizontal-stack", "cards": [
-            _mqtt_btn("15 min", "mdi:timer-outline", "cmd/open", '{"mech":"all","minutes":15}'),
-            _mqtt_btn("1 hour", "mdi:timer-outline", "cmd/open", '{"mech":"all","minutes":60}')]},
-        {"type": "horizontal-stack", "cards": [
-            _mqtt_btn("3 hours", "mdi:timer-sand", "cmd/open", '{"mech":"all","minutes":180}'),
-            _mqtt_btn("Until I close", "mdi:timer-off-outline", "cmd/open", '{"mech":"all","minutes":0}')]},
-        {"type": "horizontal-stack", "cards": [
-            _mqtt_btn("+1 hour", "mdi:timer-plus-outline", "cmd/extend", '{"mech":"open","minutes":60}'),
-            _mqtt_btn("Lock now", "mdi:lock", "cmd/close", '{"mech":"all"}', "red")]},
-    ]
-    mech_cards = []
-    for m in MECHANISMS:
-        k = m["key"]
-        sw = f"switch.agent_gate_mech_{k}"
-        mech_cards.append({"type": "tile", "entity": sw, "name": m["name"],
-                           "state_content": ["state", "end"], "tap_action": {"action": "more-info"},
-                           "icon_tap_action": {"action": "toggle"}, "color": "amber"})
-        mech_cards.append({"type": "horizontal-stack", "cards": [
-            _mqtt_btn("15 min", "mdi:timer-outline", "cmd/open", json.dumps({"mech": k, "minutes": 15})),
-            _mqtt_btn("1 hour", "mdi:timer-outline", "cmd/open", json.dumps({"mech": k, "minutes": 60})),
-            _mqtt_btn("3 hours", "mdi:timer-sand", "cmd/open", json.dumps({"mech": k, "minutes": 180})),
-            _mqtt_btn("Close", "mdi:close-circle-outline", "cmd/close", json.dumps({"mech": k}), "red")]})
-    settings = [
-        {"type": "entities", "title": "Settings", "entities": [
-            {"entity": "select.agent_gate_backup_policy", "name": "Backup before opening"},
-            {"entity": "switch.agent_gate_backup_skip_short", "name": f"No backup for windows up to {SHORT_WINDOW_MINUTES} min"},
-            {"entity": "number.agent_gate_reminder_minutes", "name": "Remind me every (min)"},
-            {"entity": "button.agent_gate_backup_now", "name": "Backup now"},
-        ]},
-        {"type": "markdown", "content": "**always**: full backup before every open. **every_6h** / **daily**: "
-                                        "only when the newest full backup (any source) is older than that. "
-                                        "**never**: no backup. The agent cannot change these settings."},
-        {"type": "horizontal-stack", "cards": [
-            {"type": "button", "name": "Add-on settings", "icon": "mdi:cog", "show_state": False,
-             "tap_action": {"action": "navigate", "navigation_path": f"/config/app/{SELF_SLUG}/config"}},
-            {"type": "button", "name": "Entities", "icon": "mdi:format-list-bulleted", "show_state": False,
-             "tap_action": {"action": "navigate", "navigation_path": "/config/entities?search=agent_gate"}},
-            {"type": "button", "name": "Log", "icon": "mdi:text-box-search-outline", "show_state": False,
-             "tap_action": {"action": "navigate", "navigation_path": f"/config/app/{SELF_SLUG}/logs"}}]},
-    ]
+    top = _row({"type": "markdown", "content": status_md},
+               _btn(D("lock_now"), "mdi:lock", _mqtt_tap("cmd/close", '{"mech":"all"}'), "red"))
     pending = {"type": "conditional",
                "conditions": [{"condition": "numeric_state", "entity": "sensor.agent_gate_pending", "above": 0}],
                "card": {"type": "vertical-stack", "cards": [
-                   {"type": "markdown", "content":
-                    "**Commands waiting for your approval**\n"
+                   {"type": "markdown", "content": "**" + D("pending_title") + "**\n"
                     "{% for i in state_attr('sensor.agent_gate_pending','items') or [] %}- `{{ i.id }}` {{ i.command }}\n{% endfor %}"},
-                   {"type": "horizontal-stack", "cards": [
-                       _mqtt_btn("Approve newest", "mdi:check-circle-outline", "action", "AGENT_GATE_APPROVE_LATEST", "green"),
-                       _mqtt_btn("Reject all", "mdi:close-circle-outline", "action", "AGENT_GATE_REJECT_ALL", "red")]}]}}
-    scan = [
-        {"type": "conditional",
-         "conditions": [{"condition": "numeric_state", "entity": "sensor.agent_gate_security_events", "above": 0}],
-         "card": {"type": "vertical-stack", "cards": [
-             {"type": "markdown", "content":
-              "**Security events in the last 24 h**\n"
-              "{% for h in state_attr('sensor.agent_gate_security_events','canary_hits') or [] %}- trap: `{{ h.what }}` touched `{{ h.where }}` ({{ as_timestamp(h.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"
-              "{% for e in state_attr('sensor.agent_gate_security_events','tamper_events') or [] %}- {{ 'gate down ' ~ e.minutes ~ ' min' if e.kind == 'down' else 'options changed: ' ~ (e.keys | join(', ')) }} ({{ as_timestamp(e.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"
-              "{% for e in state_attr('sensor.agent_gate_security_events','anomaly_events') or [] %}- {{ 'burst of ' ~ e.count ~ ' deletions, locked' if e.kind == 'anomaly_lock' else e.count ~ ' writes in a minute' }} by `{{ e.tool }}` ({{ as_timestamp(e.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"},
-             _mqtt_btn("I reviewed these, clear", "mdi:shield-check", "action", "AGENT_GATE_CLEAR_HITS", "red")]}},
-        {"type": "gauge", "entity": "sensor.agent_gate_security_score", "name": "Security score",
-         "min": 0, "max": 100, "needle": True, "severity": {"green": 90, "yellow": 70, "red": 0}},
-        {"type": "history-graph", "entities": [{"entity": "sensor.agent_gate_security_score", "name": "Score"}],
-         "hours_to_show": 168},
-        {"type": "button", "name": "Scan now", "icon": "mdi:shield-search", "show_state": False,
-         "tap_action": {"action": "perform-action", "perform_action": "button.press",
-                        "target": {"entity_id": "button.agent_gate_scan_now"}}},
-    ] + [
-        {"type": "conditional",
-         "conditions": [{"condition": "state", "entity": f"binary_sensor.agent_gate_fix_{kind}", "state": "on"}],
-         "card": dict(_mqtt_btn("Fix: " + TS("fix_" + kind), "mdi:auto-fix", "cmd/fix", kind, "amber"),
-                      tap_action={"action": "perform-action", "perform_action": "mqtt.publish",
-                                  "data": {"topic": f"{BASE}/cmd/fix", "payload": kind},
-                                  "confirmation": {"text": TS("fix_" + kind) + "?"}})}
-        for kind in FIX_KINDS
-    ] + [
-        {"type": "markdown", "content": "{{ state_attr('sensor.agent_gate_scan','markdown') or 'No scan yet.' }}"},
-        {"type": "markdown", "content": "{% set u = state_attr('sensor.agent_gate_scan','report_url') %}"
-                                        "{% if u %}[Copy / download the report]({{ u }}) · files in /share/agent_gate{% endif %}"},
+                   _row(_btn(D("approve_latest"), "mdi:check-circle-outline", _mqtt_tap("action", "AGENT_GATE_APPROVE_LATEST"), "green"),
+                        _btn(D("reject_all"), "mdi:close-circle-outline", _mqtt_tap("action", "AGENT_GATE_REJECT_ALL"), "red"))]}}
+    ev = "sensor.agent_gate_security_events"
+    events = {"type": "conditional",
+              "conditions": [{"condition": "numeric_state", "entity": ev, "above": 0}],
+              "card": {"type": "vertical-stack", "cards": [
+                  {"type": "markdown", "content": "**" + D("events_title") + "**\n"
+                   "{% for h in state_attr('" + ev + "','canary_hits') or [] %}- 🪤 " + D("ev_trap", what="{{ h.what }}", where="{{ h.where }}") + " ({{ as_timestamp(h.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"
+                   "{% for e in state_attr('" + ev + "','tamper_events') or [] %}- ⚠️ {% if e.kind == 'down' %}" + D("ev_down", m="{{ e.minutes }}") + "{% else %}" + D("ev_opts", k="{{ e.keys | join(', ') }}") + "{% endif %} ({{ as_timestamp(e.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"
+                   "{% for e in state_attr('" + ev + "','anomaly_events') or [] %}- 🚨 {% if e.kind == 'anomaly_lock' %}" + D("ev_lock", n="{{ e.count }}") + "{% else %}" + D("ev_warn", n="{{ e.count }}") + "{% endif %} `{{ e.tool }}` ({{ as_timestamp(e.ts) | timestamp_custom('%d/%m %H:%M') }})\n{% endfor %}"
+                   "{% set r = state_attr('" + ev + "','redactions_24h') | int(0) %}{% if r > 0 %}- 🔒 " + D("ev_redact", n="{{ r }}") + "\n{% endif %}"},
+                  _btn(D("events_clear"), "mdi:shield-check", _mqtt_tap("action", "AGENT_GATE_CLEAR_HITS"), "red")]}}
+    # --- mechanisms ----------------------------------------------------------
+    mech_cards = [{"type": "heading", "heading": D("mechanisms"), "icon": "mdi:door"},
+                  {"type": "markdown", "text_only": True, "content": D("mech_hint")}]
+    subviews = []
+    for m in MECHANISMS:
+        k = m["key"]
+        sw = f"switch.agent_gate_mech_{k}"
+        mech_cards.append({"type": "tile", "entity": sw, "name": m["name"], "color": "amber",
+                           "state_content": ["state", "end"], "grid_options": {"columns": 6},
+                           "tap_action": _nav(f"{base}/mech-{k}"), "icon_tap_action": {"action": "more-info"}})
+        md = ("{% set e = state_attr('" + sw + "','end') %}"
+              "{% if state_attr('" + sw + "','deviation') %}" + D("is_dev") +
+              "{% elif is_state('" + sw + "','on') %}" + D("is_open", until="{{ '" + D("until_s") + "' if not e else '" + D("until_t", t="' ~ (as_timestamp(e) | timestamp_custom('%H:%M')) ~ '") + "' }}") +
+              "{% else %}" + D("choose") + "{% endif %}")
+        subviews.append({"title": m["name"], "path": f"mech-{k}", "subview": True, "back_path": home,
+                         "type": "sections", "max_columns": 1, "sections": [{"type": "grid", "cards": [
+                             {"type": "tile", "entity": sw, "name": m["name"], "color": "amber", "state_content": ["state", "end"]},
+                             {"type": "markdown", "content": md},
+                             _row(_btn(D("m15"), "mdi:timer-outline", _mqtt_tap("cmd/open", json.dumps({"mech": k, "minutes": 15})), "amber"),
+                                  _btn(D("h1"), "mdi:timer-outline", _mqtt_tap("cmd/open", json.dumps({"mech": k, "minutes": 60})), "amber")),
+                             _row(_btn(D("h3"), "mdi:timer-sand", _mqtt_tap("cmd/open", json.dumps({"mech": k, "minutes": 180})), "amber"),
+                                  _btn(D("unlimited"), "mdi:timer-off-outline", _mqtt_tap("cmd/open", json.dumps({"mech": k, "minutes": 0})), "blue")),
+                             _row(_btn(D("plus_hour_short"), "mdi:timer-plus-outline", _mqtt_tap("cmd/extend", json.dumps({"mech": k, "minutes": 60})), "blue"),
+                                  _btn(D("close"), "mdi:close-circle-outline", _mqtt_tap("cmd/close", json.dumps({"mech": k})), "red")),
+                         ]}]})
+    # --- scan ----------------------------------------------------------------
+    sc = "sensor.agent_gate_scan"
+    scan_md = ("{% if is_state('" + sc + "','scanning') %}**" + D("scanning") + "**"
+               "{% else %}{% set c = state_attr('" + sc + "','counts') %}{% set t = state_attr('" + sc + "','ts') %}"
+               "{% set s = states('sensor.agent_gate_security_score') %}{% if c %}"
+               "{% if s not in ['unknown','unavailable'] %}**" + D("score", s="{{ s }}") + "** · {% endif %}"
+               "{{ c.critical }} / {{ c.warning }} / {{ c.info }} · {{ as_timestamp(t) | timestamp_custom('%d/%m %H:%M') }}"
+               "{% else %}" + D("no_scan") + "{% endif %}{% endif %}")
+    scan_cards = [{"type": "heading", "heading": D("scan"), "icon": "mdi:shield-search"},
+                  _row(_btn(D("scan_now"), "mdi:shield-search", {"action": "perform-action", "perform_action": "button.press",
+                                                                  "target": {"entity_id": "button.agent_gate_scan_now"}}, "green"),
+                       _btn(D("prev_scans"), "mdi:history", _nav(f"{base}/scans"), "blue")),
+                  {"type": "markdown", "text_only": True, "content": scan_md}]
+    for kind in FIX_KINDS:
+        scan_cards.append({"type": "conditional",
+                           "conditions": [{"condition": "state", "entity": f"binary_sensor.agent_gate_fix_{kind}", "state": "on"}],
+                           "card": _btn(D("fix") + TS("fix_" + kind), "mdi:auto-fix", _mqtt_tap("cmd/fix", kind), "amber",
+                                        confirm=TS("fix_" + kind) + D("confirm"))})
+    scan_cards += [events]
+    # --- settings and shortcuts ----------------------------------------------
+    upd = "update.agent_gate_update"
+    settings_cards = [
+        {"type": "heading", "heading": D("settings"), "icon": "mdi:cog"},
+        _row(_btn(D("backup_rem"), "mdi:backup-restore", _nav(f"{base}/settings")),
+             _btn(D("addon_page"), "mdi:puzzle-outline", _nav(f"/config/app/{SELF_SLUG}/info"))),
+        _row(_btn(D("check_updates"), "mdi:update", {"action": "perform-action", "perform_action": "homeassistant.update_entity",
+                                                      "target": {"entity_id": upd}}, "blue"),
+             {"type": "conditional", "conditions": [{"condition": "state", "entity": upd, "state": "on"}],
+              "card": _btn(D("update_gate"), "mdi:download", {"action": "perform-action", "perform_action": "update.install",
+                                                               "target": {"entity_id": upd}, "data": {"backup": True}},
+                           "green", confirm=D("update_confirm"))}),
+        _row(_btn(D("entities"), "mdi:format-list-bulleted", _nav("/config/entities?search=agent_gate")),
+             _btn(D("log"), "mdi:text-box-search-outline", _nav(f"/config/app/{SELF_SLUG}/logs"))),
+        _row(_btn(D("backups"), "mdi:folder-clock-outline", _nav("/config/backup")),
+             _btn(D("rebuild"), "mdi:view-dashboard-edit-outline", _mqtt_tap("action", "AGENT_GATE_REBUILD_DASHBOARD"),
+                  "grey", confirm=D("rebuild_confirm"))),
     ]
-    return {"views": [{"title": "Agent Gate", "path": "gate", "icon": "mdi:shield-lock", "type": "sections",
-                       "max_columns": 2, "sections": [
-                           {"type": "grid", "cards": [{"type": "markdown", "content": status_md}] + open_all + [pending]},
-                           {"type": "grid", "title": "Mechanisms", "cards": mech_cards},
-                           {"type": "grid", "title": "Security scan", "cards": scan},
-                           {"type": "grid", "title": "Settings", "cards": settings},
-                       ]}]}
+    # --- open all (bottom) -----------------------------------------------------
+    open_cards = [
+        {"type": "heading", "heading": D("open_all"), "icon": "mdi:lock-open-variant"},
+        {"type": "grid", "columns": 4, "square": False, "cards": [
+            _btn(D("m15"), "mdi:timer-outline", _mqtt_tap("cmd/open", '{"mech":"all","minutes":15}'), "amber"),
+            _btn(D("h1"), "mdi:timer-outline", _mqtt_tap("cmd/open", '{"mech":"all","minutes":60}'), "amber"),
+            _btn(D("h3"), "mdi:timer-sand", _mqtt_tap("cmd/open", '{"mech":"all","minutes":180}'), "amber"),
+            _btn(D("unlimited"), "mdi:timer-off-outline", _mqtt_tap("cmd/open", '{"mech":"all","minutes":0}'), "blue")]},
+        _btn(D("plus_hour"), "mdi:timer-plus-outline", _mqtt_tap("cmd/extend", '{"mech":"open","minutes":60}'), "blue"),
+    ]
+    # --- sub-views: settings, scans, scan-n ----------------------------------
+    subviews.append({"title": D("backup_rem"), "path": "settings", "subview": True, "back_path": home,
+                     "type": "sections", "max_columns": 1, "sections": [{"type": "grid", "cards": [
+                         {"type": "entities", "entities": [
+                             {"entity": "select.agent_gate_backup_policy", "name": D("backup_policy")},
+                             {"entity": "switch.agent_gate_backup_skip_short", "name": D("skip_short", n=SHORT_WINDOW_MINUTES)},
+                             {"entity": "number.agent_gate_reminder_minutes", "name": D("reminder")}]},
+                         {"type": "markdown", "content": D("policy_help")},
+                         _btn(D("backup_now"), "mdi:backup-restore", {"action": "perform-action", "perform_action": "button.press",
+                                                                      "target": {"entity_id": "button.agent_gate_backup_now"}}, "blue"),
+                     ]}]})
+    hist = [_row({"type": "gauge", "entity": "sensor.agent_gate_security_score", "name": D("score_title"),
+                  "min": 0, "max": 100, "needle": True, "severity": {"green": 90, "yellow": 70, "red": 0}},
+                 {"type": "history-graph", "entities": [{"entity": "sensor.agent_gate_security_score", "name": D("trend")}],
+                  "hours_to_show": 168}),
+            {"type": "markdown", "text_only": True, "content": D("history_hint")}]
+    for n in range(1, SCAN_SLOTS + 1):
+        h = f"sensor.agent_gate_scan_h{n}"
+        hist.append({"type": "conditional",
+                     "conditions": [{"condition": "state", "entity": h, "state_not": "none"},
+                                    {"condition": "state", "entity": h, "state_not": "unknown"},
+                                    {"condition": "state", "entity": h, "state_not": "unavailable"}],
+                     "card": {"type": "tile", "entity": h, "name": D("scan_n", n=n), "icon": "mdi:shield-search",
+                              "state_content": ["state", "summary"], "tap_action": _nav(f"{base}/scan-{n}")}})
+        link = ("{% set u = state_attr('" + sc + "','report_url') %}{% set t = state_attr('" + sc + "','ts') %}"
+                "{% if u %}## [📋 " + D("copy_report") + "]({{ u }}?t={{ as_timestamp(t) | int }}){% endif %}") if n == 1 else None
+        cards = ([{"type": "markdown", "content": link}] if link else []) + [
+            {"type": "markdown", "content": "{{ state_attr('" + h + "','markdown') or '" + D("no_data") + "' }}"}]
+        subviews.append({"title": D("report"), "path": f"scan-{n}", "subview": True, "back_path": f"{base}/scans",
+                         "type": "sections", "max_columns": 1, "sections": [{"type": "grid", "cards": cards}]})
+    subviews.append({"title": D("prev_scans"), "path": "scans", "subview": True, "back_path": home,
+                     "type": "sections", "max_columns": 1, "sections": [{"type": "grid", "cards": hist}]})
+    main = {"title": D("title"), "path": "gate", "icon": "mdi:shield-lock", "type": "sections", "max_columns": 1,
+            "sections": [{"type": "grid", "cards": [top, pending] + mech_cards + scan_cards + settings_cards + open_cards}]}
+    return {"views": [main] + subviews}
+
+
+def rebuild_dashboard():
+    """Overwrite the ready-made dashboard with the current layout (user action)."""
+    try:
+        res = _ws_call([{"type": "lovelace/dashboards/list"}])
+        existing = [d.get("url_path") for d in (res[0].get("result") or [])]
+        cmds = []
+        if DASHBOARD_URL not in existing:
+            cmds.append({"type": "lovelace/dashboards/create", "url_path": DASHBOARD_URL, "title": D("title"),
+                         "icon": "mdi:shield-lock", "show_in_sidebar": True, "require_admin": True, "mode": "storage"})
+        cmds.append({"type": "lovelace/config/save", "url_path": DASHBOARD_URL, "config": dashboard_config()})
+        res = _ws_call(cmds)
+        ok = all(r.get("success") for r in res)
+        log(f"dashboard '{DASHBOARD_URL}' rebuilt: {ok}" + ("" if ok else f" {res}"))
+    except Exception as e:
+        log(f"dashboard rebuild failed: {e}")
 
 
 def ensure_dashboard():
@@ -1800,7 +1959,7 @@ def ensure_dashboard():
         if DASHBOARD_URL in existing:
             return
         res = _ws_call([
-            {"type": "lovelace/dashboards/create", "url_path": DASHBOARD_URL, "title": "Agent Gate",
+            {"type": "lovelace/dashboards/create", "url_path": DASHBOARD_URL, "title": D("title"),
              "icon": "mdi:shield-lock", "show_in_sidebar": True, "require_admin": True, "mode": "storage"},
             {"type": "lovelace/config/save", "url_path": DASHBOARD_URL, "config": dashboard_config()},
         ])

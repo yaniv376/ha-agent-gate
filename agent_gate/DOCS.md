@@ -107,7 +107,14 @@ to one URL). A phone with the Companion app for the notification buttons.
    (add-on → Info). Otherwise a reboot starts them before the gate can lock
    them. The scan reminds you.
 7. Open the **Agent Gate** dashboard in the sidebar, or add the entities to
-   your own dashboard (see [Entities](#entities)).
+   your own dashboard (see [Entities](#entities)). The dashboard uses only
+   core Home Assistant cards, follows the add-on's `language`, and is one
+   phone-first column: status and *Lock now* on top, then the mechanisms,
+   the scan, settings and shortcuts, and the open-all buttons at the bottom.
+   Each mechanism, the settings, and the scan history open as sub-views with
+   a back button. The add-on creates it once and never overwrites your
+   edits; *Rebuild this dashboard* (under settings) resets it to the current
+   layout, for example after an update that added cards.
 
 ---
 
@@ -285,8 +292,8 @@ keys joined with `+`. `minutes: 0` means until closed. Publish to
 Connection and notifications
 - `upstream_mcp_url` (required): the MCP Server's private URL.
 - `notify_service`: `mobile_app_<phone>`; `notify` sends to everyone.
-- `language`: `en` or `he`. Notifications and scan reports follow it; the
-  ready-made dashboard is in English.
+- `language`: `en` or `he`. Notifications, scan reports and the ready-made
+  dashboard follow it.
 - `reminder_minutes` (60): reminder while something is open; 0 disables.
 - `create_dashboard` (true): create the Agent Gate dashboard if missing.
 
