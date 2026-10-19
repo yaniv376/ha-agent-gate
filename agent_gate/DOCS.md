@@ -71,8 +71,9 @@ open the gate for itself or change its settings.
 
 ## Install
 
-Requirements: Home Assistant OS or Supervised, the Mosquitto broker add-on
-(the dashboard entities are MQTT), the
+Requirements: Home Assistant OS or Supervised (the add-on needs the
+Supervisor, so Container and Core installs are not supported), the Mosquitto
+broker add-on (the dashboard entities are MQTT), the
 [Home Assistant MCP Server](https://github.com/homeassistant-ai/ha-mcp)
 add-on, and its Webhook Proxy add-on (or any proxy that forwards your agent
 to one URL). A phone with the Companion app for the notification buttons.
