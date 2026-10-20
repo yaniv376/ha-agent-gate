@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.6
+
+- **Setup checklist**: a *Setup* sub-view (and a red *Setup not finished*
+  card on top while steps are missing) checks on every scan that Mosquitto,
+  the ha-mcp repository, the MCP Server and the Webhook Proxy are installed
+  and running, that the gate has its upstream URL, that the proxy points at
+  the gate, that the backstop automations are on and that the controlled
+  add-ons do not start on boot. Each missing step links to the page where it
+  is done (my.home-assistant.io links for the add-on store).
+- **One-tap backstop install**: the gate writes the backstop package itself,
+  generated for your add-on slugs and notify service, and reloads
+  automations (`install_package` fix). No more copying YAML.
+- New sensor `sensor.agent_gate_setup` (steps left; `items` attribute).
+
 ## 0.5.5
 
 - A new window end shows on the dashboard immediately; before, it waited

@@ -96,18 +96,25 @@ to one URL). A phone with the Companion app for the notification buttons.
 4. **Point the proxy at the gate.** Webhook Proxy add-on → Configuration →
    "MCP server URL" = that endpoint. Restart the proxy. From now on every
    tool call of your agent passes through the gate.
-5. **Install the backstop.** Copy `ha/agent_gate_package.yaml` from this
-   repository to `/homeassistant/packages/agent_gate.yaml` (packages must be
-   enabled in `configuration.yaml`:
-   `homeassistant: packages: !include_dir_named packages`), edit the add-on
-   slugs inside to match your `mechanisms`, and restart Home Assistant. It
-   relays the phone buttons to the gate and, independently of the gate's
-   code, stops the editing add-ons and restarts the gate if the gate goes
-   offline. The scan warns while it is missing or disabled.
+5. **Install the backstop.** Open the add-on's dashboard → *Setup* and
+   press *Fix: Install the backstop package*. The gate writes
+   `/homeassistant/packages/agent_gate.yaml` with your add-on slugs and
+   notify service, and reloads automations. Packages must be enabled in
+   `configuration.yaml` (`homeassistant: packages: !include_dir_named packages`;
+   the Setup page says so when they are not). The package relays the phone
+   buttons to the gate and, independently of the gate's code, stops the
+   editing add-ons and restarts the gate if the gate goes offline. The scan
+   warns while it is missing or disabled. `ha/agent_gate_package.yaml` in
+   this repository is the same package for reading or manual install.
 6. **Turn off "Start on boot"** for every add-on listed under `mechanisms`
    (add-on → Info). Otherwise a reboot starts them before the gate can lock
    them. The scan reminds you.
-7. Open the **Agent Gate** dashboard in the sidebar, or add the entities to
+7. Open the **Agent Gate** dashboard in the sidebar. While anything above is
+   missing, a red *Setup not finished* card sits at the top; it opens the
+   **Setup** checklist (also under settings): one line per prerequisite,
+   checked on every scan, each missing one with a link that opens the right
+   page (add-on store page, repository, options) or a one-tap fix. Otherwise
+   use the dashboard as it is, or add the entities to
    your own dashboard (see [Entities](#entities)). The dashboard uses only
    core Home Assistant cards, follows the add-on's `language`, and is one
    phone-first column: status and *Lock now* on top, then the mechanisms,
@@ -274,7 +281,9 @@ Status: `sensor.agent_gate_status` (`locked` / `opening` / `open` /
 `binary_sensor.agent_gate_deviation`, `sensor.agent_gate_pending` (held
 commands, attribute `items`), `sensor.agent_gate_security_events` (decoy
 hits + tamper events + anomalies of the last 24 h, with the lists as
-attributes), `sensor.agent_gate_scan` and `sensor.agent_gate_scan_h1..h5`.
+attributes), `sensor.agent_gate_setup` (install steps still missing, with
+the checklist as `items`), `sensor.agent_gate_scan` and
+`sensor.agent_gate_scan_h1..h5`.
 
 **MQTT commands for your own cards.** Publish to `agent_gate/cmd/open`,
 `agent_gate/cmd/close` or `agent_gate/cmd/extend` with

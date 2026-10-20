@@ -44,7 +44,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, quote
 
 try:
     import websocket  # websocket-client, used once to create the ready-made dashboard
@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.5.5"
+VERSION = "0.5.6"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -1398,6 +1398,9 @@ def publish_discovery():
                                          "state_topic": f"{BASE}/setting/reminder_minutes/state",
                                          "command_topic": f"{BASE}/cmd/setting/reminder_minutes",
                                          "entity_category": "config"})
+    _disc("sensor", "setup", {"name": "Setup steps left", "icon": "mdi:clipboard-check-outline",
+                              "state_topic": f"{BASE}/setup/state",
+                              "json_attributes_topic": f"{BASE}/setup/attributes"})
     _disc("sensor", "scan", {"name": "Security scan", "icon": "mdi:shield-search",
                              "state_topic": f"{BASE}/scan/state",
                              "json_attributes_topic": f"{BASE}/scan/attributes"})
@@ -1506,6 +1509,12 @@ def publish_all(actual=None, deviation=None):
     pub(f"{BASE}/pending/attributes", json.dumps({
         "items": [{"id": k, "command": v["command"][:120], "created": v["created"]} for k, v in pend.items()]
     }, ensure_ascii=False), qos=1, retain=True)
+    setup = st.get("setup") or {}
+    s_items = setup.get("items") or []
+    pub(f"{BASE}/setup/state", str(sum(1 for i in s_items if not i.get("ok"))) if s_items else "0", qos=1, retain=True)
+    pub(f"{BASE}/setup/attributes", json.dumps({"items": s_items, "ts": setup.get("ts"),
+                                                "mcp_slug": MCP_SLUG, "proxy_slug": PROXY_SLUG, "gate_slug": SELF_SLUG},
+                                               ensure_ascii=False), qos=1, retain=True)
     hits, tev, reds, anom = canary_hits_recent(), tamper_events_recent(), redactions_recent(), anomaly_events_recent()
     pub(f"{BASE}/security_events/state", str(len(hits) + len(tev) + len(anom)), qos=1, retain=True)
     pub(f"{BASE}/security_events/attributes", json.dumps({
@@ -1768,6 +1777,16 @@ DASH_STRINGS = {
         "checking": "Checking for updates...", "checked_ok": "Checked {t}: {v} is the latest version",
         "checked_upd": "Checked {t}: {v} is available", "backing_up": "Backup running, about a minute and a half...",
         "open_fb_locked": "Everything is locked.", "open_fb_open": "{n} open, next close {t}.", "open_fb_unl": "{n} open until you close.",
+        "setup": "Setup", "setup_todo": "Setup not finished", "setup_todo_sub": "steps left, tap for the checklist",
+        "setup_intro": "Each line is checked on every scan. Tap a link to go where the step is done; it opens in the Home Assistant app or browser.",
+        "setup_done": "Everything is in place. The scan keeps checking.",
+        "s_mosquitto": "Mosquitto broker running", "s_repo": "ha-mcp add-on repository added",
+        "s_mcp": "Home Assistant MCP Server running", "s_proxy": "Webhook Proxy running",
+        "s_upstream": "Gate knows the MCP Server URL (upstream_mcp_url)", "s_proxy_target": "Webhook Proxy points at the gate",
+        "s_package": "Backstop automations installed and on", "s_boot": "Controlled add-ons do not start on boot",
+        "l_install": "Install", "l_add_repo": "Add repository", "l_start": "Open add-on page", "l_options": "Open options",
+        "l_proxy_options": "Set this URL as MCP server URL in the proxy options",
+        "l_package": "What the package does",
     },
     "he": {
         "title": "שער הסוכן", "status": "מצב", "lock_now": "נעל עכשיו",
@@ -1805,6 +1824,16 @@ DASH_STRINGS = {
         "checking": "בודק עדכונים...", "checked_ok": "נבדק ב-{t}: {v} היא הגרסה האחרונה",
         "checked_upd": "נבדק ב-{t}: גרסה {v} זמינה", "backing_up": "גיבוי רץ, כדקה וחצי...",
         "open_fb_locked": "הכול נעול.", "open_fb_open": "{n} פתוחים, הסגירה הבאה {t}.", "open_fb_unl": "{n} פתוחים עד שתסגור.",
+        "setup": "התקנה", "setup_todo": "ההתקנה לא הושלמה", "setup_todo_sub": "שלבים נותרו, לחץ לרשימה",
+        "setup_intro": "כל שורה נבדקת בכל סריקה. לחיצה על קישור מובילה למקום שבו עושים את השלב, באפליקציה או בדפדפן.",
+        "setup_done": "הכול במקום. הסריקה ממשיכה לבדוק.",
+        "s_mosquitto": "Mosquitto רץ", "s_repo": "ריפו התוספים של ha-mcp נוסף",
+        "s_mcp": "Home Assistant MCP Server רץ", "s_proxy": "Webhook Proxy רץ",
+        "s_upstream": "השער מכיר את כתובת ה-MCP Server (upstream_mcp_url)", "s_proxy_target": "ה-Webhook Proxy מצביע על השער",
+        "s_package": "אוטומציות הגיבוי מותקנות ופעילות", "s_boot": "התוספים המבוקרים לא עולים באתחול",
+        "l_install": "התקן", "l_add_repo": "הוסף ריפו", "l_start": "פתח את עמוד התוסף", "l_options": "פתח הגדרות",
+        "l_proxy_options": "הגדר את הכתובת הזו כ-MCP server URL בהגדרות הפרוקסי",
+        "l_package": "מה החבילה עושה",
     },
 }
 
@@ -1974,6 +2003,39 @@ def dashboard_config():
             "{% elif s == 'locked' %}" + D("open_fb_locked") + "{% endif %}"},
     ]
     # --- sub-views: settings, scans, scan-n ----------------------------------
+    # --- setup checklist -----------------------------------------------------
+    su = "sensor.agent_gate_setup"
+    my = "https://my.home-assistant.io/redirect/"
+    labels = {k: D("s_" + k) for k in ("mosquitto", "repo", "mcp", "proxy", "upstream", "proxy_target", "package", "boot")}
+    links = {
+        "mosquitto": (D("l_install"), f"{my}supervisor_addon/?addon={MOSQ_SLUG}"),
+        "repo": (D("l_add_repo"), f"{my}supervisor_add_addon_repository/?repository_url=" + quote(MCP_REPO_URL, safe="")),
+        "mcp": (D("l_install"), f"{my}supervisor_addon/?addon={MCP_SLUG}"),
+        "proxy": (D("l_install"), f"{my}supervisor_addon/?addon={PROXY_SLUG}"),
+        "upstream": (D("l_options"), f"/config/app/{SELF_SLUG}/config"),
+        "proxy_target": (D("l_options"), f"/config/app/{PROXY_SLUG}/config"),
+        "package": (D("l_package"), "https://github.com/yaniv376/ha-agent-gate/blob/main/agent_gate/ha/agent_gate_package.yaml"),
+        "boot": (D("l_start"), f"/config/app/{SELF_SLUG}/info"),
+    }
+    setup_md = ("{% set L = " + json.dumps(labels, ensure_ascii=False) + " %}{% set U = " + json.dumps(links, ensure_ascii=False) + " %}"
+                "{% set items = state_attr('" + su + "','items') or [] %}"
+                "{% if items and states('" + su + "') == '0' %}✅ " + D("setup_done") + "\n\n{% endif %}"
+                "{% for i in items %}{{ '✅' if i.ok else '❌' }} **{{ L[i.key] }}**"
+                "{% if i.detail %}: `{{ i.detail }}`{% endif %}"
+                "{% if not i.ok and U[i.key] %} → [{{ U[i.key][0] }}]({{ U[i.key][1] }}){% endif %}\n\n{% endfor %}")
+    setup_cards = [{"type": "markdown", "text_only": True, "content": D("setup_intro")},
+                   {"type": "markdown", "content": setup_md}]
+    for kind in ("install_package", "boot_manual"):
+        setup_cards.append({"type": "conditional",
+                            "conditions": [{"condition": "state", "entity": f"binary_sensor.agent_gate_fix_{kind}", "state": "on"}],
+                            "card": _btn(D("fix") + TS("fix_" + kind), "mdi:auto-fix", _mqtt_tap("cmd/fix", kind), "amber",
+                                         confirm=TS("fix_" + kind) + D("confirm"), entity=f"binary_sensor.agent_gate_fix_{kind}", columns=12)})
+    subviews.append({"title": D("setup"), "path": "setup", "subview": True, "back_path": home,
+                     "type": "sections", "max_columns": 1, "sections": [{"type": "grid", "cards": setup_cards}]})
+    setup_tile = {"type": "conditional", "conditions": [{"condition": "numeric_state", "entity": su, "above": 0}],
+                  "card": dict(_btn(D("setup_todo"), "mdi:clipboard-alert-outline", _nav(f"{base}/setup"), "red", entity=su, columns=12),
+                               hide_state=False, state_content=["state"])}
+    settings_cards.insert(1, _btn(D("setup"), "mdi:clipboard-check-outline", _nav(f"{base}/setup")))
     subviews.append({"title": D("backup_rem"), "path": "settings", "subview": True, "back_path": home,
                      "type": "sections", "max_columns": 1, "sections": [{"type": "grid", "cards": [
                          {"type": "entities", "entities": [
@@ -2011,7 +2073,7 @@ def dashboard_config():
     subviews.append({"title": D("prev_scans"), "path": "scans", "subview": True, "back_path": home,
                      "type": "sections", "max_columns": 1, "sections": [{"type": "grid", "cards": hist}]})
     main = {"title": D("title"), "path": "gate", "icon": "mdi:shield-lock", "type": "sections", "max_columns": 1,
-            "sections": [{"type": "grid", "cards": top + [pending] + mech_cards + scan_cards + settings_cards + open_cards}]}
+            "sections": [{"type": "grid", "cards": top + [pending, setup_tile] + mech_cards + scan_cards + settings_cards + open_cards}]}
     return {"views": [main] + subviews}
 
 
@@ -2110,6 +2172,8 @@ SCAN_STRINGS = {
         "fix_update_addons": "Update the add-ons (with a backup)",
         "fix_enable_backstop": "Enable the backstop automations",
         "fix_watchdog_on": "Turn on the gate's watchdog",
+        "fix_install_package": "Install the backstop package",
+        "s_not_installed": "not installed", "s_packages_line": "add to configuration.yaml: homeassistant: packages: !include_dir_named packages",
         "fix_done": "Fix applied: {label}", "fix_failed": "Fix failed: {label} ({err})",
         "fix": "Fix", "scan_failed": "Scan failed: {e}",
         "notify_title": "Agent Gate: security scan", "notify_new": "New critical findings:",
@@ -2154,6 +2218,8 @@ SCAN_STRINGS = {
         "fix_update_addons": "עדכן את התוספים (עם גיבוי)",
         "fix_enable_backstop": "הפעל את אוטומציות הגיבוי",
         "fix_watchdog_on": "הדלק את ה-watchdog של השער",
+        "fix_install_package": "התקן את חבילת הגיבוי (backstop)",
+        "s_not_installed": "לא מותקן", "s_packages_line": "הוסף ל-configuration.yaml: homeassistant: packages: !include_dir_named packages",
         "fix_done": "התיקון בוצע: {label}", "fix_failed": "התיקון נכשל: {label} ({err})",
         "fix": "תיקון", "scan_failed": "הסריקה נכשלה: {e}",
         "notify_title": "שער הסוכן: סריקת אבטחה", "notify_new": "ממצאים קריטיים חדשים:",
@@ -2222,7 +2288,139 @@ def _ws_tokens():
         return None
 
 
-FIX_KINDS = ("boot_manual", "uninstall_uncontrolled", "update_addons", "enable_backstop", "watchdog_on")
+FIX_KINDS = ("boot_manual", "uninstall_uncontrolled", "update_addons", "enable_backstop", "watchdog_on",
+             "install_package")
+
+# --- setup checklist ---------------------------------------------------------
+MCP_REPO_URL = "https://github.com/homeassistant-ai/ha-mcp"
+MCP_SLUG, PROXY_SLUG, MOSQ_SLUG = "81f33d0f_ha_mcp", "81f33d0f_ha_mcp_webhook_proxy", "core_mosquitto"
+PACKAGE_PATH = "/homeassistant/packages/agent_gate.yaml"
+CONFIG_YAML = "/homeassistant/configuration.yaml"
+BACKSTOP_AUTOMATIONS = ("automation.agent_gate_guard_when_gate_is_offline",
+                        "automation.agent_gate_guard_on_long_deviation",
+                        "automation.agent_gate_relay_phone_actions")
+
+
+def package_yaml():
+    """The backstop package, generated for this install: the add-on slugs of
+    every mechanism, this add-on's slug and the configured notify service."""
+    slugs = sorted({a for m in MECHANISMS for a in m["addons"]})
+    svc = (OPT.get("notify_service") or "notify").replace("notify.", "")
+    stops = "".join(f"      - action: hassio.addon_stop\n        data: {{ addon: {a} }}\n        continue_on_error: true\n" for a in slugs)
+    return f"""# Agent Gate - Home Assistant side. Generated by the add-on ({VERSION}); the
+# "Install the backstop package" button rewrites it with the current slugs.
+automation:
+  - id: agent_gate_phone_action_relay
+    alias: "Agent Gate: relay phone actions"
+    description: "Forwards AGENT_GATE_* notification buttons to the gate add-on"
+    mode: queued
+    triggers:
+      - trigger: event
+        event_type: mobile_app_notification_action
+    conditions:
+      - condition: template
+        value_template: "{{{{ trigger.event.data.action is string and trigger.event.data.action.startswith('AGENT_GATE_') }}}}"
+    actions:
+      - action: mqtt.publish
+        data:
+          topic: agent_gate/action
+          payload: "{{{{ trigger.event.data.action }}}}"
+
+  - id: agent_gate_guard_offline
+    alias: "Agent Gate: guard when gate is offline"
+    description: "Gate add-on offline for 3 minutes: stop editing add-ons, restart the gate, notify"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: sensor.agent_gate_status
+        to: "unavailable"
+        for: "00:03:00"
+    actions:
+      - action: notify.{svc}
+        data:
+          title: "Agent Gate offline"
+          message: "The gate add-on is down. Stopping the editing add-ons, then restarting the gate."
+        continue_on_error: true
+{stops}      - action: hassio.addon_start
+        data: {{ addon: {SELF_SLUG} }}
+        continue_on_error: true
+
+  - id: agent_gate_guard_deviation
+    alias: "Agent Gate: guard on long deviation"
+    description: "Deviation reported for 10 minutes (gate did not enforce): stop editing add-ons"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.agent_gate_deviation
+        to: "on"
+        for: "00:10:00"
+    actions:
+      - action: notify.{svc}
+        data:
+          title: "Agent Gate: forced lock"
+          message: "Deviation lasted 10 minutes. Stopping the editing add-ons."
+        continue_on_error: true
+{stops}"""
+
+
+def packages_enabled():
+    """True when configuration.yaml includes a packages directory."""
+    try:
+        with open(CONFIG_YAML, encoding="utf-8") as f:
+            txt = f.read()
+        return "packages:" in txt and "include_dir" in txt
+    except Exception:
+        return False
+
+
+def install_package():
+    """Write the generated backstop package and reload automations."""
+    os.makedirs(os.path.dirname(PACKAGE_PATH), exist_ok=True)
+    with open(PACKAGE_PATH, "w", encoding="utf-8") as f:
+        f.write(package_yaml())
+    ha_call_service("automation", "reload", {})
+
+
+def compute_setup(addons, st_by_id, boot_auto_slugs, port):
+    """Install checklist for the dashboard: one entry per prerequisite,
+    ok=True/False, a short detail. Computed during each scan."""
+    by_slug = {a.get("slug"): a for a in addons}
+
+    def running(slug):
+        a = by_slug.get(slug)
+        return bool(a) and a.get("state") == "started"
+
+    items = []
+    items.append({"key": "mosquitto", "ok": running(MOSQ_SLUG) or bool(MQTT_CLIENT and MQTT_CLIENT.is_connected()), "detail": ""})
+    repo_ok = MCP_SLUG in by_slug
+    if not repo_ok:
+        try:
+            code, store = _sup_request("GET", "/store/addons", timeout=30)
+            repo_ok = code == 200 and any(a.get("slug") == MCP_SLUG for a in store.get("data", {}).get("addons", []))
+        except Exception:
+            pass
+    items.append({"key": "repo", "ok": repo_ok, "detail": ""})
+    items.append({"key": "mcp", "ok": running(MCP_SLUG), "detail": "" if MCP_SLUG in by_slug else TS("s_not_installed")})
+    items.append({"key": "proxy", "ok": running(PROXY_SLUG), "detail": "" if PROXY_SLUG in by_slug else TS("s_not_installed")})
+    items.append({"key": "upstream", "ok": bool(UPSTREAM.hostname), "detail": ""})
+    endpoint = f"http://<ip>:{port}{ENDPOINT_PATH}"
+    target_ok = False
+    if PROXY_SLUG in by_slug:
+        try:
+            code, info = _sup_request("GET", f"/addons/{PROXY_SLUG}/info", timeout=20)
+            opts = (info.get("data", {}) or {}).get("options", {}) if code == 200 else {}
+            target_ok = any(isinstance(v, str) and f":{port}{ENDPOINT_PATH}" in v for v in opts.values())
+        except Exception:
+            pass
+    items.append({"key": "proxy_target", "ok": target_ok, "detail": "" if target_ok else endpoint})
+    present = [a for a in BACKSTOP_AUTOMATIONS if a in st_by_id]
+    pkg_ok = len(present) == len(BACKSTOP_AUTOMATIONS) and all(st_by_id.get(a) != "off" for a in present)
+    detail = ""
+    if not pkg_ok and not packages_enabled():
+        detail = TS("s_packages_line")
+    items.append({"key": "package", "ok": pkg_ok, "detail": detail})
+    items.append({"key": "boot", "ok": not boot_auto_slugs, "detail": ", ".join(boot_auto_slugs)})
+    return items
 
 
 def apply_fix(kind):
@@ -2259,6 +2457,8 @@ def apply_fix(kind):
             code, _ = _sup_request("POST", f"/addons/{SELF_SLUG}/options", {"watchdog": True})
             if code != 200:
                 errors.append(f"watchdog: {code}")
+        elif kind == "install_package":
+            install_package()
     except Exception as e:
         errors.append(str(e))
     audit({"tool": "fix", "decision": "ok" if not errors else "error", "reason": kind,
@@ -2468,6 +2668,15 @@ def run_scan(source="manual"):
             fixes.append({"kind": "enable_backstop", "entities": disabled, "names": disabled})
         if any(f["key"] == "f_watchdog" for f in findings):
             fixes.append({"kind": "watchdog_on", "names": []})
+        if missing:
+            fixes.append({"kind": "install_package", "names": missing})
+        try:
+            setup_items = compute_setup(addons, st_by_id, boot_auto_slugs, int(OPT.get("listen_port") or 9584))
+        except Exception as e:
+            log(f"setup check failed: {e}")
+            setup_items = []
+        with STATE_LOCK:
+            STATE["setup"] = {"items": setup_items, "ts": iso(now)}
         for f in fixes:
             f["label"] = TS("fix_" + f["kind"])
         report = {"ts": iso(now), "source": source, "counts": counts, "findings": findings,
