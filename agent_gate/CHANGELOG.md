@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.7
+
+- **Approval history**: a new *Approval history* page (button under
+  *Settings and shortcuts*, `sensor.agent_gate_history`) lists every command you
+  approved, rejected or left unanswered, described in plain words (for example
+  "Delete files (/config/www/old)") with the exact command underneath and
+  whether it ran fine. Below it, the access windows you opened, extended or
+  locked, with how many commands ran and how many files changed.
+
 ## 0.5.6
 
 - **Setup checklist**: a *Setup* sub-view (and a red *Setup not finished*

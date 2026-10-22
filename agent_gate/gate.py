@@ -1215,6 +1215,8 @@ def timer_loop():
                 for pid, p in list(STATE["pending"].items()):
                     if p.get("status") == "pending" and now - parse_iso(p["created"]) > tmo:
                         p["status"] = "expired"
+                        _append_jsonl(HISTORY_PATH, {"event": "approval", "id": pid, "ts": iso(now),
+                                                     "verdict": "expired", "command": p.get("command", "")})
                 if STATE["pending"]:
                     save_state()
             if time.time() - last_actual_pub >= 30:
@@ -1420,6 +1422,9 @@ def publish_discovery():
     _disc("sensor", "pending", {"name": "Pending approvals", "icon": "mdi:account-question",
                                 "state_topic": f"{BASE}/pending/state",
                                 "json_attributes_topic": f"{BASE}/pending/attributes"})
+    _disc("sensor", "history", {"name": "Approval history", "icon": "mdi:history",
+                                "state_topic": f"{BASE}/history/state",
+                                "json_attributes_topic": f"{BASE}/history/attributes"})
     _disc("sensor", "security_events", {"name": "Security events (24 h)", "icon": "mdi:shield-alert",
                                         "state_topic": f"{BASE}/security_events/state",
                                         "json_attributes_topic": f"{BASE}/security_events/attributes"})
@@ -1509,6 +1514,12 @@ def publish_all(actual=None, deviation=None):
     pub(f"{BASE}/pending/attributes", json.dumps({
         "items": [{"id": k, "command": v["command"][:120], "created": v["created"]} for k, v in pend.items()]
     }, ensure_ascii=False), qos=1, retain=True)
+    try:
+        n_dec, md = build_history()
+        pub(f"{BASE}/history/state", str(n_dec), qos=1, retain=True)
+        pub(f"{BASE}/history/attributes", json.dumps({"markdown": md}, ensure_ascii=False), qos=1, retain=True)
+    except Exception as e:
+        log(f"history publish error: {e}")
     setup = st.get("setup") or {}
     s_items = setup.get("items") or []
     pub(f"{BASE}/setup/state", str(sum(1 for i in s_items if not i.get("ok"))) if s_items else "0", qos=1, retain=True)
@@ -1695,6 +1706,8 @@ def handle_action(payload):
                 p = pend.get(k)
                 if p and p.get("status") == "pending":
                     p["status"] = verdict
+                    _append_jsonl(HISTORY_PATH, {"event": "approval", "id": k, "ts": iso(now_utc()),
+                                                 "verdict": verdict, "command": p.get("command", "")})
             save_state()
         log(f"approval {ids}: {verdict}")
         publish_all()
@@ -1740,6 +1753,95 @@ def _mqtt_btn(name, icon, topic, payload, color=None):
     return c
 
 
+# --------------------------------------------------------------------------
+# 4c. history of what the user approved, in plain language
+# --------------------------------------------------------------------------
+def _first_path(command):
+    for tok in re.split(r"\s+", command.strip())[1:]:
+        if tok and not tok.startswith("-") and ("/" in tok or "." in tok):
+            return tok.strip("'\"")
+    return ""
+
+
+PLAIN_RULES = [
+    (r"\bha\s+core\s+(restart|rebuild)", "pc_restart_ha"),
+    (r"\bha\s+(host|os)\s+(reboot|shutdown)|\breboot\b|\bshutdown\b", "pc_reboot"),
+    (r"\bha\s+supervisor\b", "pc_supervisor"),
+    (r"\bdocker\s+(restart|stop|kill|rm|rmi|compose)", "pc_docker"),
+    (r"\bdocker\b", "pc_docker"),
+    (r"\bgit\s+(reset|clean|checkout\s+--|push\s+-f)", "pc_git"),
+    (r"\bkill", "pc_kill"),
+    (r"\b(rm|rmdir|unlink|shred)\b", "pc_delete"),
+    (r"\bmv\b", "pc_move"),
+    (r"\b(chmod|chown)\b", "pc_perms"),
+    (r"\b(dd|mkfs\w*)\b", "pc_disk"),
+    (r"\btruncate\b", "pc_truncate"),
+    (r">\s*/", "pc_overwrite"),
+]
+
+
+def plain_command(command):
+    """One short sentence a non-technical person understands."""
+    for rx, key in PLAIN_RULES:
+        if re.search(rx, command, re.I):
+            path = _first_path(command) if key in ("pc_delete", "pc_move", "pc_perms", "pc_truncate") else ""
+            return D(key) + (f" ({path[:60]})" if path else "")
+    return D("pc_other")
+
+
+def _hist_when(ts):
+    dt = parse_iso(ts)
+    return dt.astimezone().strftime("%d/%m %H:%M") if dt else "?"
+
+
+def _hist_names(keys):
+    return ", ".join(mech_name(k) for k in keys) if keys else "-"
+
+
+def build_history(max_dec=20, max_win=12):
+    """Returns (number of command decisions, markdown) from the window log."""
+    events = []
+    try:
+        with open(HISTORY_PATH, encoding="utf-8") as f:
+            for line in f.readlines()[-1500:]:
+                try:
+                    events.append(json.loads(line))
+                except Exception:
+                    pass
+    except FileNotFoundError:
+        pass
+    ran = {e["id"]: e.get("rc") for e in events if e.get("event") == "approval_ran"}
+    decisions = [e for e in events if e.get("event") == "approval"][::-1]
+    wins = [e for e in events if e.get("event") in ("open", "extend", "lock")][::-1]
+    out = ["## " + D("h_cmds")]
+    if not decisions:
+        out.append(D("h_none_cmds"))
+    for e in decisions[:max_dec]:
+        v = e.get("verdict")
+        icon = {"approved": "✅", "rejected": "🚫", "expired": "⌛"}.get(v, "•")
+        tail = ""
+        if v == "approved":
+            rc = ran.get(e.get("id"))
+            tail = " · " + (D("h_ran_ok") if rc == 0 else (D("h_not_run") if rc is None else D("h_ran_fail")))
+        out.append(f"{icon} **{_hist_when(e.get('ts'))}** · {D('h_' + v)}: {plain_command(e.get('command', ''))}{tail}\n"
+                   f"`{(e.get('command') or '')[:110].replace('`', chr(39))}`\n")
+    out.append("## " + D("h_wins"))
+    if not wins:
+        out.append(D("h_none_wins"))
+    for e in wins[:max_win]:
+        when = _hist_when(e.get("ts"))
+        if e["event"] == "open":
+            m = e.get("minutes")
+            dur = D("h_for_min", m=m) if m else D("h_until_closed")
+            out.append(f"🔓 **{when}** · {D('h_opened')}: {_hist_names(e.get('mechanisms'))} · {dur}")
+        elif e["event"] == "extend":
+            out.append(f"⏱️ **{when}** · {D('h_extended', m=e.get('minutes'))}: {_hist_names(e.get('mechanisms'))}")
+        else:
+            out.append(f"🔒 **{when}** · {D('h_locked')} ({e.get('reason', '')}) · "
+                       + D("h_summary", n=e.get("commands", 0), f=len(e.get("changed_files") or [])))
+    return len(decisions), "\n\n".join(out)
+
+
 DASH_STRINGS = {
     "en": {
         "title": "Agent Gate", "status": "Status", "lock_now": "Lock now",
@@ -1758,6 +1860,19 @@ DASH_STRINGS = {
         "score": "Score {s}/100", "prev_scans": "Previous scans", "prev_scans_sub": "Full report and history",
         "score_title": "Security score", "trend": "7 days", "report": "Scan report", "copy_report": "Copy or download the report",
         "scan_n": "Scan {n}", "no_data": "No data", "fix": "Fix: ", "confirm": "?",
+        "history": "Approval history", "history_sub": "What you approved, in plain words",
+        "h_cmds": "Commands you were asked about", "h_wins": "Access you opened",
+        "h_none_cmds": "No command has needed your approval yet.", "h_none_wins": "No access window yet.",
+        "h_approved": "You approved", "h_rejected": "You rejected", "h_expired": "No answer (expired)",
+        "h_ran_ok": "ran fine", "h_ran_fail": "ran with an error", "h_not_run": "not run",
+        "h_for_min": "for {m} min", "h_until_closed": "until you close it", "h_opened": "You opened",
+        "h_extended": "You added {m} min", "h_locked": "Locked", "h_summary": "{n} commands, {f} changed files",
+        "pc_restart_ha": "Restart Home Assistant", "pc_reboot": "Restart or shut down the whole device",
+        "pc_supervisor": "Change the Home Assistant supervisor", "pc_docker": "Stop, restart or remove a container",
+        "pc_git": "Throw away or overwrite code changes", "pc_kill": "Force-stop a running program",
+        "pc_delete": "Delete files", "pc_move": "Move or rename files", "pc_perms": "Change who can open files",
+        "pc_disk": "Write directly to a disk (dangerous)", "pc_truncate": "Empty a file",
+        "pc_overwrite": "Overwrite a system file", "pc_other": "Run a command that can change the system",
         "settings": "Settings and shortcuts", "backup_rem": "Backup policy", "backup_rem_sub": "Backup policy, reminders",
         "addon_page": "Add-on page", "addon_page_sub": "Options, log, version", "check_updates": "Check updates",
         "installed": "installed {v}", "new_version": "New version available", "update_gate": "Update the gate",
@@ -1805,6 +1920,19 @@ DASH_STRINGS = {
         "score": "ציון {s}/100", "prev_scans": "סריקות קודמות", "prev_scans_sub": "הדוח המלא וההיסטוריה",
         "score_title": "ציון אבטחה", "trend": "7 ימים", "report": "דוח סריקה", "copy_report": "העתק או הורד את הדוח",
         "scan_n": "סריקה {n}", "no_data": "אין נתונים", "fix": "תקן: ", "confirm": "?",
+        "history": "היסטוריית אישורים", "history_sub": "מה אישרת, בשפה פשוטה",
+        "h_cmds": "פקודות ששאלו אותך עליהן", "h_wins": "גישה שפתחת",
+        "h_none_cmds": "עדיין לא הייתה פקודה שדרשה את אישורך.", "h_none_wins": "עדיין לא נפתח חלון גישה.",
+        "h_approved": "אישרת", "h_rejected": "דחית", "h_expired": "לא ענית (פג תוקף)",
+        "h_ran_ok": "בוצעה בהצלחה", "h_ran_fail": "בוצעה עם שגיאה", "h_not_run": "לא הורצה",
+        "h_for_min": "ל-{m} דק׳", "h_until_closed": "עד שתסגור", "h_opened": "פתחת",
+        "h_extended": "הוספת {m} דק׳", "h_locked": "נעלת", "h_summary": "{n} פקודות, {f} קבצים השתנו",
+        "pc_restart_ha": "הפעלה מחדש של Home Assistant", "pc_reboot": "הפעלה מחדש או כיבוי של כל המכשיר",
+        "pc_supervisor": "שינוי במפקח של Home Assistant", "pc_docker": "עצירה, הפעלה מחדש או הסרה של קונטיינר",
+        "pc_git": "ביטול או דריסה של שינויים בקוד", "pc_kill": "עצירה בכוח של תוכנה שרצה",
+        "pc_delete": "מחיקת קבצים", "pc_move": "העברה או שינוי שם של קבצים", "pc_perms": "שינוי הרשאות גישה לקבצים",
+        "pc_disk": "כתיבה ישירה לדיסק (מסוכן)", "pc_truncate": "ריקון קובץ",
+        "pc_overwrite": "דריסה של קובץ מערכת", "pc_other": "הרצת פקודה שיכולה לשנות את המערכת",
         "settings": "הגדרות וקיצורי דרך", "backup_rem": "גיבוי ותזכורות", "backup_rem_sub": "מדיניות גיבוי, תזכורות",
         "addon_page": "עמוד התוסף", "addon_page_sub": "הגדרות, לוג, גרסה", "check_updates": "בדוק עדכונים",
         "installed": "מותקנת {v}", "new_version": "יש גרסה חדשה", "update_gate": "עדכן את השער",
@@ -1966,6 +2094,7 @@ def dashboard_config():
     settings_cards = [
         {"type": "heading", "heading": D("settings"), "icon": "mdi:cog"},
         _btn(D("backup_rem"), "mdi:backup-restore", _nav(f"{base}/settings")),
+        _btn(D("history"), "mdi:history", _nav(f"{base}/history"), "blue", entity="sensor.agent_gate_history"),
         _btn(D("addon_page"), "mdi:puzzle-outline", _nav(f"/config/app/{SELF_SLUG}/info")),
         dict(_btn(D("check_updates"), "mdi:update", _mqtt_tap("action", "AGENT_GATE_CHECK_UPDATES"), "blue", entity=upd),
              hide_state=False, state_content=["installed_version"]),
@@ -2036,6 +2165,9 @@ def dashboard_config():
                   "card": dict(_btn(D("setup_todo"), "mdi:clipboard-alert-outline", _nav(f"{base}/setup"), "red", entity=su, columns=12),
                                hide_state=False, state_content=["state"])}
     settings_cards.insert(1, _btn(D("setup"), "mdi:clipboard-check-outline", _nav(f"{base}/setup")))
+    subviews.append({"title": D("history"), "path": "history", "subview": True, "back_path": home,
+                     "type": "sections", "max_columns": 1, "sections": [{"type": "grid", "cards": [
+                         {"type": "markdown", "content": "{{ state_attr('sensor.agent_gate_history','markdown') or '' }}"}]}]})
     subviews.append({"title": D("backup_rem"), "path": "settings", "subview": True, "back_path": home,
                      "type": "sections", "max_columns": 1, "sections": [{"type": "grid", "cards": [
                          {"type": "entities", "entities": [
@@ -3156,6 +3288,8 @@ def execute_command(command, cwd, timeout, approval_id=None):
     _append_jsonl(COMMANDS_PATH, {"ts": iso(now_utc()), "window_id": wid, "command": command,
                                   "cwd": cwd, "rc": rc, "seconds": round(time.time() - started, 1),
                                   "approval_id": approval_id})
+    if approval_id:
+        _append_jsonl(HISTORY_PATH, {"event": "approval_ran", "id": approval_id, "ts": iso(now_utc()), "rc": rc})
     limit = 20000
     text = f"exit code: {rc}\n--- stdout ---\n{out[:limit]}"
     if len(out) > limit:
