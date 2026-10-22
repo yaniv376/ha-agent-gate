@@ -1515,9 +1515,12 @@ def publish_all(actual=None, deviation=None):
         "items": [{"id": k, "command": v["command"][:120], "created": v["created"]} for k, v in pend.items()]
     }, ensure_ascii=False), qos=1, retain=True)
     try:
-        n_dec, md = build_history()
+        n_dec, mds = build_history()
+        attrs = {"cmds": mds["cmds"], "gate": mds["gate"]}
+        if LANG != "he":
+            attrs["he_cmds"], attrs["he_gate"] = build_history("he")[1].values()
         pub(f"{BASE}/history/state", str(n_dec), qos=1, retain=True)
-        pub(f"{BASE}/history/attributes", json.dumps({"markdown": md}, ensure_ascii=False), qos=1, retain=True)
+        pub(f"{BASE}/history/attributes", json.dumps(attrs, ensure_ascii=False), qos=1, retain=True)
     except Exception as e:
         log(f"history publish error: {e}")
     setup = st.get("setup") or {}
@@ -1780,13 +1783,22 @@ PLAIN_RULES = [
 ]
 
 
-def plain_command(command):
+def _dl(lang):
+    """D() for a fixed language (the history is published in the add-on language and in Hebrew)."""
+    def f(key, **kw):
+        v = DASH_STRINGS.get(lang, DASH_STRINGS["en"]).get(key) or DASH_STRINGS["en"].get(key, key)
+        return v.format(**kw) if kw else v
+    return f
+
+
+def plain_command(command, d=None):
     """One short sentence a non-technical person understands."""
+    d = d or D
     for rx, key in PLAIN_RULES:
         if re.search(rx, command, re.I):
             path = _first_path(command) if key in ("pc_delete", "pc_move", "pc_perms", "pc_truncate") else ""
-            return D(key) + (f" ({path[:60]})" if path else "")
-    return D("pc_other")
+            return d(key) + (f" ({path[:60]})" if path else "")
+    return d("pc_other")
 
 
 def _hist_when(ts):
@@ -1798,48 +1810,62 @@ def _hist_names(keys):
     return ", ".join(mech_name(k) for k in keys) if keys else "-"
 
 
-def build_history(max_dec=20, max_win=12):
-    """Returns (number of command decisions, markdown) from the window log."""
+def _read_history_events():
     events = []
     try:
         with open(HISTORY_PATH, encoding="utf-8") as f:
-            for line in f.readlines()[-1500:]:
+            for line in f:
                 try:
                     events.append(json.loads(line))
                 except Exception:
                     pass
     except FileNotFoundError:
         pass
+    return events
+
+
+def build_history(lang=None, max_cmds=20, max_gate=15):
+    """Returns (number of command decisions, {"cmds": md, "gate": md}).
+    Lines are numbered by their position since the log began (oldest = 1), so a number
+    keeps pointing at the same line while newer ones are added on top."""
+    d = _dl(lang) if lang else D
+    events = _read_history_events()
     ran = {e["id"]: e.get("rc") for e in events if e.get("event") == "approval_ran"}
-    decisions = [e for e in events if e.get("event") == "approval"][::-1]
-    wins = [e for e in events if e.get("event") in ("open", "extend", "lock")][::-1]
-    out = ["## " + D("h_cmds")]
+    decisions = [e for e in events if e.get("event") == "approval"]
+    wins = [e for e in events if e.get("event") in ("open", "extend", "lock")]
+    cmds = ["## " + d("h_cmds"), d("h_legend_c")]
     if not decisions:
-        out.append(D("h_none_cmds"))
-    for e in decisions[:max_dec]:
+        cmds.append(d("h_none_cmds"))
+    for i in range(len(decisions) - 1, max(-1, len(decisions) - 1 - max_cmds), -1):
+        e = decisions[i]
         v = e.get("verdict")
         icon = {"approved": "✅", "rejected": "🚫", "expired": "⌛"}.get(v, "•")
         tail = ""
         if v == "approved":
             rc = ran.get(e.get("id"))
-            tail = " · " + (D("h_ran_ok") if rc == 0 else (D("h_not_run") if rc is None else D("h_ran_fail")))
-        out.append(f"{icon} **{_hist_when(e.get('ts'))}** · {D('h_' + v)}: {plain_command(e.get('command', ''))}{tail}\n"
-                   f"`{(e.get('command') or '')[:110].replace('`', chr(39))}`\n")
-    out.append("## " + D("h_wins"))
+            tail = " · " + (d("h_ran_ok") if rc == 0 else (d("h_not_run") if rc is None else d("h_ran_fail")))
+        cmds.append(f"**{d('h_pref_c')}{i + 1}** {icon} {_hist_when(e.get('ts'))} · {d('h_' + v)}: "
+                    f"{plain_command(e.get('command', ''), d)}{tail}\n"
+                    f"`{(e.get('command') or '')[:110].replace('`', chr(39))}`\n")
+    gate = ["## " + d("h_wins"), d("h_legend_g")]
     if not wins:
-        out.append(D("h_none_wins"))
-    for e in wins[:max_win]:
+        gate.append(d("h_none_wins"))
+    reasons = {"dashboard": d("h_r_dashboard"), "phone": d("h_r_phone"), "timer expired": d("h_r_timer")}
+    for i in range(len(wins) - 1, max(-1, len(wins) - 1 - max_gate), -1):
+        e = wins[i]
         when = _hist_when(e.get("ts"))
+        n = f"**{d('h_pref_g')}{i + 1}**"
         if e["event"] == "open":
             m = e.get("minutes")
-            dur = D("h_for_min", m=m) if m else D("h_until_closed")
-            out.append(f"🔓 **{when}** · {D('h_opened')}: {_hist_names(e.get('mechanisms'))} · {dur}")
+            dur = d("h_for_min", m=m) if m else d("h_until_closed")
+            gate.append(f"{n} 🔓 {when} · {d('h_opened')}: {_hist_names(e.get('mechanisms'))} · {dur}")
         elif e["event"] == "extend":
-            out.append(f"⏱️ **{when}** · {D('h_extended', m=e.get('minutes'))}: {_hist_names(e.get('mechanisms'))}")
+            gate.append(f"{n} ⏱️ {when} · {d('h_extended', m=e.get('minutes'))}: {_hist_names(e.get('mechanisms'))}")
         else:
-            out.append(f"🔒 **{when}** · {D('h_locked')} ({e.get('reason', '')}) · "
-                       + D("h_summary", n=e.get("commands", 0), f=len(e.get("changed_files") or [])))
-    return len(decisions), "\n\n".join(out)
+            r = e.get("reason", "")
+            gate.append(f"{n} 🔒 {when} · {d('h_locked')} ({reasons.get(r, r)}) · "
+                        + d("h_summary", n=e.get("commands", 0), f=len(e.get("changed_files") or [])))
+    return len(decisions), {"cmds": "\n\n".join(cmds), "gate": "\n\n".join(gate)}
 
 
 DASH_STRINGS = {
@@ -1862,6 +1888,9 @@ DASH_STRINGS = {
         "scan_n": "Scan {n}", "no_data": "No data", "fix": "Fix: ", "confirm": "?",
         "history": "Approval history", "history_sub": "What you approved, in plain words",
         "h_cmds": "Commands you were asked about", "h_wins": "Access you opened",
+        "h_legend_c": "C = a command you were asked about", "h_legend_g": "G = opening, extending or locking access",
+        "h_pref_c": "C", "h_pref_g": "G", "h_filter_all": "All", "h_filter_cmds": "Commands", "h_filter_gate": "Gate",
+        "h_r_dashboard": "from the dashboard", "h_r_phone": "from the phone", "h_r_timer": "time ran out",
         "h_none_cmds": "No command has needed your approval yet.", "h_none_wins": "No access window yet.",
         "h_approved": "You approved", "h_rejected": "You rejected", "h_expired": "No answer (expired)",
         "h_ran_ok": "ran fine", "h_ran_fail": "ran with an error", "h_not_run": "not run",
@@ -1922,6 +1951,9 @@ DASH_STRINGS = {
         "scan_n": "סריקה {n}", "no_data": "אין נתונים", "fix": "תקן: ", "confirm": "?",
         "history": "היסטוריית אישורים", "history_sub": "מה אישרת, בשפה פשוטה",
         "h_cmds": "פקודות ששאלו אותך עליהן", "h_wins": "גישה שפתחת",
+        "h_legend_c": "פ = פקודה ששאלו אותך עליה", "h_legend_g": "ש = פתיחה, הארכה או נעילה של הגישה",
+        "h_pref_c": "פ", "h_pref_g": "ש", "h_filter_all": "הכול", "h_filter_cmds": "פקודות", "h_filter_gate": "שער",
+        "h_r_dashboard": "מהדשבורד", "h_r_phone": "מהטלפון", "h_r_timer": "הזמן נגמר",
         "h_none_cmds": "עדיין לא הייתה פקודה שדרשה את אישורך.", "h_none_wins": "עדיין לא נפתח חלון גישה.",
         "h_approved": "אישרת", "h_rejected": "דחית", "h_expired": "לא ענית (פג תוקף)",
         "h_ran_ok": "בוצעה בהצלחה", "h_ran_fail": "בוצעה עם שגיאה", "h_not_run": "לא הורצה",
@@ -2165,9 +2197,16 @@ def dashboard_config():
                   "card": dict(_btn(D("setup_todo"), "mdi:clipboard-alert-outline", _nav(f"{base}/setup"), "red", entity=su, columns=12),
                                hide_state=False, state_content=["state"])}
     settings_cards.insert(1, _btn(D("setup"), "mdi:clipboard-check-outline", _nav(f"{base}/setup")))
-    subviews.append({"title": D("history"), "path": "history", "subview": True, "back_path": home,
-                     "type": "sections", "max_columns": 1, "sections": [{"type": "grid", "cards": [
-                         {"type": "markdown", "content": "{{ state_attr('sensor.agent_gate_history','markdown') or '' }}"}]}]})
+    for hpath, hexpr in (("history", "(state_attr('sensor.agent_gate_history','cmds') or '') ~ '\n\n' ~ (state_attr('sensor.agent_gate_history','gate') or '')"),
+                         ("history-cmds", "state_attr('sensor.agent_gate_history','cmds') or ''"),
+                         ("history-gate", "state_attr('sensor.agent_gate_history','gate') or ''")):
+        filt = {"type": "horizontal-stack", "cards": [
+            _btn(D("h_filter_all"), "mdi:format-list-bulleted", _nav(f"{base}/history")),
+            _btn(D("h_filter_cmds"), "mdi:console", _nav(f"{base}/history-cmds")),
+            _btn(D("h_filter_gate"), "mdi:lock-open-variant", _nav(f"{base}/history-gate"))]}
+        subviews.append({"title": D("history"), "path": hpath, "subview": True, "back_path": home,
+                         "type": "sections", "max_columns": 1, "sections": [{"type": "grid", "cards": [
+                             filt, {"type": "markdown", "content": "{{ " + hexpr + " }}"}]}]})
     subviews.append({"title": D("backup_rem"), "path": "settings", "subview": True, "back_path": home,
                      "type": "sections", "max_columns": 1, "sections": [{"type": "grid", "cards": [
                          {"type": "entities", "entities": [

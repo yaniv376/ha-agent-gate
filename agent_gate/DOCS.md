@@ -281,7 +281,7 @@ Status: `sensor.agent_gate_status` (`locked` / `opening` / `open` /
 `binary_sensor.agent_gate_deviation`, `sensor.agent_gate_pending` (held
 commands, attribute `items`), `sensor.agent_gate_security_events` (decoy
 hits + tamper events + anomalies of the last 24 h, with the lists as
-attributes), `sensor.agent_gate_history` (plain-language list of what you approved, attribute `markdown`), `sensor.agent_gate_setup` (install steps still missing, with
+attributes), `sensor.agent_gate_history` (plain-language, numbered list of what you approved and of gate openings; attributes `cmds`, `gate`, `he_cmds`, `he_gate`), `sensor.agent_gate_setup` (install steps still missing, with
 the checklist as `items`), `sensor.agent_gate_scan` and
 `sensor.agent_gate_scan_h1..h5`.
 

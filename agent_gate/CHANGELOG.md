@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.8
+
+- **Approval history is split and numbered**: three views (*All*, *Commands*,
+  *Gate*) with filter buttons on top. Every line has a number (C1, C2... for
+  commands, G1, G2... for opening, extending and locking), counted from the
+  start of the log so a number keeps pointing at the same line. The sensor
+  `sensor.agent_gate_history` now publishes `cmds` and `gate` (add-on language)
+  plus `he_cmds` and `he_gate` (Hebrew) as attributes.
+
 ## 0.5.7
 
 - **Approval history**: a new *Approval history* page (button under
