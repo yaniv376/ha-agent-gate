@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.9
+
+- **Open at once, backup alongside**: new setting *Open at once, backup runs
+  alongside* (`switch.agent_gate_backup_parallel`, option `backup_parallel`,
+  off by default). When a backup is due, the windows open immediately and the
+  full backup runs in parallel instead of the gate waiting about a minute and a
+  half. The status shows "backup running alongside". If that backup fails, the
+  window stays open and you get a notification that there is no restore point
+  from this opening. Anything the agent writes in the first minutes may only be
+  partly inside that backup; leave the setting off if you want a restore point
+  that is guaranteed to exist before the first write.
+
 ## 0.5.8
 
 - **Approval history is split and numbered**: three views (*All*, *Commands*,

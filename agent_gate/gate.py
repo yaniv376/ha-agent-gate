@@ -109,6 +109,7 @@ def load_options():
         "approval_timeout_minutes": 3,
         "backup_policy": "always",
         "backup_skip_short": False,
+        "backup_parallel": False,
         "language": "en",
         "default_window_minutes": 30,
         "create_dashboard": True,
@@ -218,6 +219,7 @@ BACKUP_POLICIES = {"always": None, "every_6h": 6, "daily": 24, "never": None}
 SETTINGS_KEYS = {
     "backup_policy": tuple(BACKUP_POLICIES),
     "backup_skip_short": ("ON", "OFF"),
+    "backup_parallel": ("ON", "OFF"),
     "reminder_minutes": (0, 1440),
 }
 SHORT_WINDOW_MINUTES = 15
@@ -247,7 +249,7 @@ def set_setting(key, value):
         return False
     if isinstance(spec[0], str):
         value = str(value).strip()
-        if key == "backup_skip_short":
+        if key in ("backup_skip_short", "backup_parallel"):
             value = "ON" if value.upper() in ("ON", "TRUE", "1") else "OFF"
         if value not in spec:
             return False
@@ -279,6 +281,14 @@ def backup_policy():
     return "always"
 
 
+def backup_parallel():
+    """True: the window opens at once and the backup runs alongside it."""
+    v = setting("backup_parallel")
+    if isinstance(v, str):
+        return v.upper() == "ON"
+    return bool(v)
+
+
 def backup_skip_short():
     v = setting("backup_skip_short")
     if isinstance(v, str):
@@ -294,6 +304,7 @@ STRINGS = {
         "title_still_open": "Agent Gate still OPEN", "title_deviation": "Agent Gate: deviation",
         "until": "until", "until_closed": "until you close it",
         "backup_failed": "Backup failed. Nothing was opened.",
+        "backup_failed_parallel": "The backup that ran while the window was open failed. The window stays open, but there is no restore point from this opening.",
         "backup_failed_plain": "Backup failed.", "backup_done": "Backup created.",
         "closed_expired": "{names}: time is up, closed.",
         "locked_line": "Locked ({reason}). {n} command(s) ran.",
@@ -318,6 +329,7 @@ STRINGS = {
         "title_still_open": "שער הסוכן עדיין פתוח", "title_deviation": "שער הסוכן: סטייה",
         "until": "עד", "until_closed": "עד שתסגור",
         "backup_failed": "הגיבוי נכשל. שום דבר לא נפתח.",
+        "backup_failed_parallel": "הגיבוי שרץ בזמן שהחלון פתוח נכשל. החלון נשאר פתוח, אבל אין נקודת שחזור מהפתיחה הזו.",
         "backup_failed_plain": "הגיבוי נכשל.", "backup_done": "הגיבוי נוצר.",
         "closed_expired": "{names}: הזמן נגמר, נסגר.",
         "locked_line": "ננעל ({reason}). רצו {n} פקודות.",
@@ -1005,6 +1017,23 @@ def describe_windows():
 OPEN_LOCK = threading.Lock()
 
 
+def parallel_backup_job(name):
+    """Full backup that runs while the window is already open."""
+    with STATE_LOCK:
+        STATE["busy"] = "backup"
+    publish_all()
+    slug = create_full_backup(name)
+    with STATE_LOCK:
+        if slug:
+            STATE["backup"] = slug
+            STATE["last_backup_at"] = iso(now_utc())
+        STATE["busy"] = None
+        save_state()
+    if not slug:
+        notify(T("title"), T("backup_failed_parallel"), tag="agent_gate_window")
+    publish_all()
+
+
 def open_mechs(keys, minutes, source="dashboard"):
     """Open (or re-time) the given mechanisms. minutes == 0 means 'until closed'."""
     keys = [k for k in keys if k in MECH_BY_KEY]
@@ -1029,10 +1058,14 @@ def open_mechs(keys, minutes, source="dashboard"):
             save_state()
         publish_all()
         backup = None
+        parallel_backup = False
         if first_open:
             need, why = backup_needed(minutes)
             log(f"backup before opening: {'yes' if need else 'skipped'} ({why})")
-            if need:
+            if need and backup_parallel():
+                # Open at once; the backup runs alongside and reports when it is done.
+                parallel_backup = True
+            elif need:
                 with STATE_LOCK:
                     STATE["phase"] = "backup"
                 publish_all()
@@ -1055,6 +1088,8 @@ def open_mechs(keys, minutes, source="dashboard"):
             STATE["mode"] = "open"
             STATE["phase"] = None
             save_state()
+        if parallel_backup:
+            _bg(parallel_backup_job, f"agent_gate_{datetime.now().strftime('%Y%m%d_%H%M')}")
         publish_all()   # the new end shows on the dashboard at once; starting add-ons can take a while
         apply_addons(keys)
         _append_jsonl(HISTORY_PATH, {"event": "open", "window_id": wid, "ts": iso(now_utc()),
@@ -1394,6 +1429,10 @@ def publish_discovery():
                                           "state_topic": f"{BASE}/setting/backup_skip_short/state",
                                           "command_topic": f"{BASE}/cmd/setting/backup_skip_short",
                                           "entity_category": "config"})
+    _disc("switch", "backup_parallel", {"name": "Open without waiting for the backup", "icon": "mdi:timer-sand",
+                                        "state_topic": f"{BASE}/setting/backup_parallel/state",
+                                        "command_topic": f"{BASE}/cmd/setting/backup_parallel",
+                                        "entity_category": "config"})
     _disc("number", "reminder_minutes", {"name": "Reminder every (min)", "icon": "mdi:bell-ring-outline",
                                          "min": 0, "max": 240, "step": 15, "mode": "slider",
                                          "unit_of_measurement": "min",
@@ -1508,6 +1547,7 @@ def publish_all(actual=None, deviation=None):
         qos=1, retain=True)
     pub(f"{BASE}/setting/backup_policy/state", backup_policy(), qos=1, retain=True)
     pub(f"{BASE}/setting/backup_skip_short/state", "ON" if backup_skip_short() else "OFF", qos=1, retain=True)
+    pub(f"{BASE}/setting/backup_parallel/state", "ON" if backup_parallel() else "OFF", qos=1, retain=True)
     pub(f"{BASE}/setting/reminder_minutes/state", str(setting("reminder_minutes") or 0), qos=1, retain=True)
     pend = {k: v for k, v in st.get("pending", {}).items() if v.get("status") == "pending"}
     pub(f"{BASE}/pending/state", str(len(pend)), qos=1, retain=True)
@@ -1872,6 +1912,7 @@ DASH_STRINGS = {
     "en": {
         "title": "Agent Gate", "status": "Status", "lock_now": "Lock now",
         "locked": "Locked", "locked_sub": "No agent access right now",
+        "parallel": "Open at once, backup runs alongside", "bk_alongside": "Backup running alongside",
         "opening_check": "Opening, checking the last backup...", "opening_backup": "Opening, backup running...",
         "deviation": "Deviation!", "deviation_sub": "{names} running without a window. The gate stops it in a few minutes.",
         "open_n": "Open: {n} mechanisms", "next_close": "Next close in {m} min ({t})", "until_closed": "Open until you close it",
@@ -1935,6 +1976,7 @@ DASH_STRINGS = {
     "he": {
         "title": "שער הסוכן", "status": "מצב", "lock_now": "נעל עכשיו",
         "locked": "נעול", "locked_sub": "אין גישה לסוכן",
+        "parallel": "פתח מיד, הגיבוי רץ במקביל", "bk_alongside": "גיבוי רץ במקביל",
         "opening_check": "נפתח, בודק גיבוי…", "opening_backup": "נפתח, מגבה…",
         "deviation": "סטייה!", "deviation_sub": "{names} רץ בלי חלון. השער יעצור אותו בעוד כמה דקות.",
         "open_n": "פתוח: {n} מנגנונים", "next_close": "הקרוב נסגר בעוד {m} דק׳ ({t})", "until_closed": "פתוח עד שתסגור",
@@ -2160,6 +2202,7 @@ def dashboard_config():
             "{% set e = state_attr('sensor.agent_gate_status','soonest_end') %}{% set n = state_attr('sensor.agent_gate_status','open_mechanisms') | count %}"
             "{% if s == 'opening' %}**{{ '" + D("opening_backup") + "' if p == 'backup' else '" + D("opening_check") + "' }}**"
             "{% elif s == 'open' and e %}" + D("open_fb_open", n="{{ n }}", t="{{ as_timestamp(e) | timestamp_custom('%H:%M') }}") +
+            "{% if state_attr('sensor.agent_gate_status','busy') == 'backup' %} · " + D("bk_alongside") + "{% endif %}" +
             "{% elif s == 'open' %}" + D("open_fb_unl", n="{{ n }}") +
             "{% elif s == 'locked' %}" + D("open_fb_locked") + "{% endif %}"},
     ]
@@ -2212,6 +2255,7 @@ def dashboard_config():
                          {"type": "entities", "entities": [
                              {"entity": "select.agent_gate_backup_policy", "name": D("backup_policy")},
                              {"entity": "switch.agent_gate_backup_skip_short", "name": D("skip_short", n=SHORT_WINDOW_MINUTES)},
+                             {"entity": "switch.agent_gate_backup_parallel", "name": D("parallel")},
                              {"entity": "number.agent_gate_reminder_minutes", "name": D("reminder")}]},
                          {"type": "markdown", "content": D("policy_help")},
                          _btn(D("backup_now"), "mdi:backup-restore", {"action": "perform-action", "perform_action": "button.press",

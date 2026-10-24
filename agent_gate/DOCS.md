@@ -270,7 +270,7 @@ per mechanism (ON = open now; turning it on uses `default_window_minutes`),
 `button.agent_gate_extend_60`, `button.agent_gate_lock_now`,
 `button.agent_gate_backup_now`, `button.agent_gate_scan_now`.
 
-Settings: `select.agent_gate_backup_policy`, `switch.agent_gate_backup_skip_short`,
+Settings: `select.agent_gate_backup_policy`, `switch.agent_gate_backup_skip_short`, `switch.agent_gate_backup_parallel`,
 `number.agent_gate_reminder_minutes`. A value set here overrides the option.
 
 Status: `sensor.agent_gate_status` (`locked` / `opening` / `open` /
@@ -315,6 +315,8 @@ Windows and backups
   duration.
 - `backup_policy` (`always`): `always`, `every_6h`, `daily` or `never`;
   `backup_skip_short` (false): no backup for windows of 15 minutes or less.
+  `backup_parallel` (false): open the windows at once and run the backup alongside
+  instead of waiting for it. If that backup fails the window stays open and you are notified.
 - `deviation_grace_minutes` (5): how long an add-on may run without a window.
 - `approval_timeout_minutes` (3): how long a held command waits for you.
 
