@@ -107,6 +107,7 @@ def load_options():
         "reminder_minutes": 60,
         "deviation_grace_minutes": 5,
         "approval_timeout_minutes": 3,
+        "approval_wait_seconds": 45,
         "backup_policy": "always",
         "backup_skip_short": False,
         "backup_parallel": False,
@@ -3435,6 +3436,31 @@ def run_gate_tool(name, args):
                         {"action": f"AGENT_GATE_REJECT_{pid}", "title": T("btn_reject")}],
                tag=f"agent_gate_approval_{pid}")
         publish_all()
+        # Wait for the answer here, so one tap on the phone is all it takes: the command runs and
+        # its output comes back in this very call. Only when nobody answers in time does the agent
+        # get the old "HELD" reply and can call again with the approval_id.
+        try:
+            wait = max(0, min(170, int(OPT.get("approval_wait_seconds") or 0)))
+        except Exception:
+            wait = 0
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            time.sleep(1)
+            with STATE_LOCK:
+                p = STATE["pending"].get(pid)
+                status = p.get("status") if p else "expired"
+                if status == "approved":
+                    p["status"] = "done"
+                    save_state()
+            if status == "approved":
+                res = execute_command(command, cwd, timeout, pid)
+                publish_all()
+                return res
+            if status in ("rejected", "expired"):
+                return tool_text(f"The user {status if status == 'rejected' else 'did not answer in time and the request expired'}; "
+                                 "the command did not run.", True)
+            if not is_active("commands"):
+                return tool_text("The gate was locked while waiting for approval; the command did not run.", True)
         return tool_text(f"HELD for user approval (destructive pattern). approval_id={pid}. "
                          f"The user has {OPT.get('approval_timeout_minutes', 3)} minutes to approve on their "
                          f"phone. Tell the user, wait, then call gate_run_command with approval_id only.")

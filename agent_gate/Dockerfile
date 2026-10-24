@@ -1,6 +1,6 @@
 FROM python:3.12-alpine
 
-LABEL io.hass.version="0.5.9" \
+LABEL io.hass.version="0.5.10" \
       io.hass.type="addon"
 
 ENV PYTHONUNBUFFERED=1

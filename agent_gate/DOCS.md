@@ -315,6 +315,8 @@ Windows and backups
   duration.
 - `backup_policy` (`always`): `always`, `every_6h`, `daily` or `never`;
   `backup_skip_short` (false): no backup for windows of 15 minutes or less.
+  `approval_wait_seconds` (45): how long a held command waits for your tap before the agent gets
+  the "held" reply; approving inside that time runs the command at once (0 = off).
   `backup_parallel` (false): open the windows at once and run the backup alongside
   instead of waiting for it. If that backup fails the window stays open and you are notified.
 - `deviation_grace_minutes` (5): how long an add-on may run without a window.

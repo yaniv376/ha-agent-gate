@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.10
+
+- **One tap approves and runs**: when a destructive command is held, the call now
+  waits for your answer (`approval_wait_seconds`, default 45, 0 = old behaviour).
+  Approve on the phone notification or the dashboard and the command runs and its
+  output comes back in the same call, so the agent no longer has to call again
+  with the approval id. Reject (or no answer in time) ends the call with a clear
+  message; after the wait the old "held, call again with approval_id" reply
+  still works.
+
 ## 0.5.9
 
 - **Open at once, backup alongside**: new setting *Open at once, backup runs
