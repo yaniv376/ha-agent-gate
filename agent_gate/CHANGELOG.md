@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.6.0
+
+Security release. Thanks to Matt Abate (@mattabate) for reading the code and
+reporting the first two items.
+
+- **Sandboxed shell (protection 8).** `gate_run_command` used to run with the
+  gate's environment, including the Supervisor token, and as a root that
+  could read and change the gate's own files. Commands now start through
+  `sandbox.py`: clean environment, every capability dropped, `no_new_privs`;
+  the gate is non-dumpable and `/data` plus the image belong to a private uid.
+  A command can still edit `/homeassistant`, `/addons` and `/share` as
+  before, but it cannot read the token, the gate's state or its code.
+- **Protected-pattern check hardened.** The match also runs with quotes,
+  backslashes and whitespace removed, and a `hassio.*` service call with a
+  Jinja template in its arguments is refused. The docs now say plainly that
+  this is a text match and what it is for.
+- **`anomaly_*_per_min: 0` now disables that threshold** as documented
+  (issue #1): the options were read with an `or default` that turned 0 back
+  into the default.
+- **`SIGINT` is ignored** (pid 1 ignores unhandled signals; only `SIGTERM`
+  from the Supervisor stops the gate), and `pkill` / `killall` join the held
+  commands.
+- **Docs: "What the gate does not protect"** rewritten with the honest
+  picture: what an open window hands over, the limits of the held-command
+  list, and what a stop of the gate does and does not achieve.
+
 ## 0.5.10
 
 - **One tap approves and runs**: when a destructive command is held, the call now

@@ -1,6 +1,6 @@
 FROM python:3.12-alpine
 
-LABEL io.hass.version="0.5.10" \
+LABEL io.hass.version="0.6.0" \
       io.hass.type="addon"
 
 ENV PYTHONUNBUFFERED=1
@@ -14,6 +14,7 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY gate.py /app/gate.py
+COPY sandbox.py /app/sandbox.py
 COPY run.sh /run.sh
 RUN chmod a+x /run.sh
 

@@ -38,6 +38,7 @@ import os
 import re
 import secrets
 import socketserver
+import ctypes
 import subprocess
 import sys
 import threading
@@ -69,6 +70,12 @@ HISTORY_PATH = os.path.join(DATA_DIR, "windows.jsonl")
 
 SUPERVISOR = os.environ.get("SUPERVISOR_URL", "http://supervisor")
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
+# The gate's private uid: everything inside the image and /data is owned by it, so a
+# command run for the agent (uid 0 with no capabilities) cannot read or change the
+# gate itself. The uid has no passwd entry; it is only ever used for ownership.
+PRIVATE_UID = int(os.environ.get("GATE_PRIVATE_UID") or 60001)
+SANDBOX_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sandbox.py")
+OWNED_MARK = "/.agent_gate_owned"
 # Supervisor sets HOSTNAME to "<repo>-agent-gate"; the add-on slug is the same with underscores.
 SELF_SLUG = os.environ.get("GATE_SELF_SLUG") or os.environ.get("HOSTNAME", "local-agent-gate").replace("-", "_")
 
@@ -427,6 +434,43 @@ def ha_host():
 # --------------------------------------------------------------------------
 # 2. Supervisor / HA helpers
 # --------------------------------------------------------------------------
+def harden_self():
+    """Protect the gate from the commands it runs for the agent (see sandbox.py).
+    1. Non-dumpable: /proc/<gate>/environ, mem and fd need CAP_SYS_PTRACE, which the
+       sandboxed command does not have, so the Supervisor token cannot be read there.
+    2. Private ownership: /data (state, settings, canary token, logs) and the image
+       (/app, binaries, Python) belong to PRIVATE_UID; without CAP_DAC_OVERRIDE the
+       sandboxed command gets 'permission denied' on them, while the gate (root with
+       capabilities) is unaffected. The image is chowned once per container.
+    Nothing here changes the host mounts (/homeassistant, /addons, /share)."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(4, 0, 0, 0, 0)   # PR_SET_DUMPABLE = 0
+    except Exception as e:
+        log(f"harden: prctl failed: {e}")
+    if os.getuid() != 0:
+        return
+    try:
+        os.chown(DATA_DIR, PRIVATE_UID, PRIVATE_UID)
+        os.chmod(DATA_DIR, 0o700)
+    except OSError as e:
+        log(f"harden: could not protect {DATA_DIR}: {e}")
+    if os.path.exists(OWNED_MARK):
+        return
+    roots = [p for p in ("/app", "/run.sh", "/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc",
+                         "/var", "/root", "/opt", "/home", "/srv", "/mnt", "/media") if os.path.lexists(p)]
+    t0 = time.time()
+    try:
+        subprocess.run(["chown", "-R", "-h", f"{PRIVATE_UID}:{PRIVATE_UID}"] + roots,
+                       capture_output=True, timeout=600)
+        with open(OWNED_MARK, "w") as f:
+            f.write(iso(now_utc()))
+        os.chown(OWNED_MARK, PRIVATE_UID, PRIVATE_UID)
+        log(f"harden: image files now belong to uid {PRIVATE_UID} ({time.time() - t0:.1f}s)")
+    except Exception as e:
+        log(f"harden: image chown failed: {e}")
+
+
 def _sup_request(method, path, body=None, timeout=30):
     u = urlsplit(SUPERVISOR)
     conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=timeout)
@@ -578,9 +622,25 @@ def is_read_tool(name):
     return any(fnmatch.fnmatchcase(name, p) for p in READ_PATTERNS)
 
 
+_QUOTE_NOISE = re.compile(r"""\\\\|\\"|["'`]|\\n|\\t|\s+""")
+_TEMPLATE = re.compile(r"\{\{|\{%")
+
+
 def touches_protected(arguments):
+    r"""True when the call names the gate. Besides the plain substring, the text is
+    also checked with quotes, backslashes and whitespace removed (agent_g""ate,
+    agent_\gate, agent_g ate), and a Supervisor service call (hassio.*) whose
+    arguments contain a Jinja template is refused outright: the slug could be
+    assembled at render time where no string check can see it."""
     blob = json.dumps(arguments or {}, ensure_ascii=False).lower()
-    return any(p in blob for p in PROTECTED)
+    if any(p in blob for p in PROTECTED):
+        return True
+    flat = _QUOTE_NOISE.sub("", blob)
+    if any(p in flat for p in PROTECTED):
+        return True
+    if ("hassio." in blob or "domain:hassio" in flat) and _TEMPLATE.search(blob):
+        return True
+    return False
 
 
 def is_destructive(command):
@@ -844,8 +904,9 @@ def is_delete_like(name, args):
 
 
 def _anomaly_thresholds():
-    w = int(OPT.get("anomaly_writes_warn_per_min") or 60)
-    d = int(OPT.get("anomaly_deletes_lock_per_min") or 5)
+    # 0 means "off" (issue #1): load_options() already filled the defaults, so no "or" here.
+    w = int(OPT.get("anomaly_writes_warn_per_min", 60))
+    d = int(OPT.get("anomaly_deletes_lock_per_min", 5))
     with STATE_LOCK:
         unlimited = any(not v.get("end") for v in (STATE.get("windows") or {}).values())
     return (w * 2, d * 2) if unlimited else (w, d)
@@ -3359,7 +3420,10 @@ def execute_command(command, cwd, timeout, approval_id=None):
     cwd = cwd or ("/addons" if os.path.isdir("/addons") else "/")
     started = time.time()
     try:
-        proc = subprocess.run(["sh", "-c", command], cwd=cwd, capture_output=True, timeout=timeout)
+        env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+               "HOME": "/tmp", "LANG": "C.UTF-8", "TERM": "dumb", "AGENT_GATE": "1"}
+        proc = subprocess.run([sys.executable, "-I", SANDBOX_PATH, "sh", "-c", command],
+                              cwd=cwd, env=env, capture_output=True, timeout=timeout)
         rc = proc.returncode
         out = proc.stdout.decode("utf-8", "replace")
         err = proc.stderr.decode("utf-8", "replace")
@@ -3473,6 +3537,7 @@ def run_gate_tool(name, args):
 def main():
     global MQTT_CLIENT
     os.makedirs(DATA_DIR, exist_ok=True)
+    harden_self()
     save_state()
     port = int(OPT.get("listen_port") or 9584)
     log(f"mechanisms: {[m['key'] for m in MECHANISMS]}")
@@ -3519,7 +3584,7 @@ def main():
         threading.Thread(target=srv.shutdown, daemon=True).start()
     import signal
     signal.signal(signal.SIGTERM, _stop)
-    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)   # pid 1 ignores it; a sandboxed command cannot stop the gate
     srv.serve_forever()
     log("stopped")
 

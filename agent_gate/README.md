@@ -171,7 +171,7 @@ five scans are on `sensor.agent_gate_scan_h1` ... `h5`.
 
 ---
 
-## The seven protections
+## The eight protections
 
 ### 1. The lock
 
@@ -186,6 +186,14 @@ put in `protected_patterns`) is refused even in an open window. The agent can
 read the gate's entities but cannot switch them, change the add-on's options,
 restart it or edit its files. The dashboard tools in `protected_exempt_tools`
 are the exception, so the agent can still build cards that show the gate.
+
+The check is a text match, so it is also run with quotes, backslashes and
+whitespace stripped (`agent_g""ate` is still caught), and a Supervisor
+service call (`hassio.*`) whose arguments contain a Jinja template is refused
+outright, because a slug assembled at render time cannot be matched. It is
+still a text match: treat it as protection against ordinary requests and
+mistakes, not as a boundary against an agent working to get around it. The
+boundary is protection 8.
 
 ### 3. Decoys (honeypot)
 
@@ -259,6 +267,31 @@ editing add-ons and restarts the gate; a deviation that lasts 10 minutes is
 stopped by Home Assistant too. It does not depend on the gate's code.
 
 ---
+
+### 8. Sandboxed shell
+
+`gate_run_command` runs inside the gate's own container, and the gate holds the
+Supervisor token (it needs it to start and stop add-ons and make backups). A
+command must not inherit that power, so every command is started through a
+launcher that clears the environment, drops every Linux capability and sets
+`no_new_privs` before the shell starts. The result:
+
+- `$SUPERVISOR_TOKEN` is not in the command's environment, and the gate's own
+  `/proc/1/environ` and memory are unreadable (the gate is non-dumpable;
+  reading would need `CAP_SYS_PTRACE`).
+- `/data` (state, settings, decoy token, logs) and the whole image (`/app`,
+  binaries, Python) belong to a private uid, so the command gets
+  "permission denied" on them: it cannot edit the gate's state, patch its
+  code or trojan a binary the gate runs on its next start.
+- `setuid` binaries (`su`, `sudo`) cannot hand the capabilities back.
+- The uid stays 0, which is what lets the command edit the root-owned files
+  in `/homeassistant`, `/addons` and `/share`, as before. A file there owned by
+  another user cannot be edited by the agent's shell any more (rare; HA and its
+  add-ons write as root).
+
+This is done in code, with no extra packages: `sandbox.py` next to `gate.py`.
+The gate marks the image once per container (`/.agent_gate_owned`), which adds
+a few seconds to the first start after an install or update.
 
 ## Entities
 
@@ -355,6 +388,25 @@ Defences
 - **The agent's own judgement.** Inside an open window a write that is wrong
   but not destructive goes through. Backups, the session summary and the
   audit log are there for that case.
+- **What a window hands over.** Write access to the Home Assistant
+  configuration is, in the end, control of the machine: an agent could add a
+  `shell_command` to `configuration.yaml`, reload, and run it inside Home
+  Assistant's own container, which also holds a Supervisor token. A commands
+  window can reach the network of the other add-ons, including the MCP server
+  behind the gate, if that server accepts unauthenticated connections. The
+  gate makes the obvious routes to itself fail (protections 2 and 8) and
+  reports what it can detect (protection 6: options changed, gate down), but
+  inside an open window it cannot make a determined agent harmless. Keep
+  windows short, and open the commands mechanism only when you need it.
+- **The held-command list.** `destructive_patterns` catches the usual
+  spellings (`rm`, `mv`, `docker`, `kill` ...). It does not catch
+  `find -delete`, a Python one-liner or any other way to say the same thing.
+  It is there to stop accidents and give you a chance to say no, not to stop
+  an agent that is trying to avoid the question.
+- **Stopping the gate.** A command can send the gate a `SIGTERM`
+  (same uid). The Supervisor watchdog restarts it, the state on disk is out
+  of the command's reach, and the gate re-evaluates every window on start, so
+  the result is a restart, not an open door; the downtime is reported.
 - **You.** Whoever can open the dashboard or receives the phone
   notifications controls the gate. Keep Home Assistant's own login and
   remote access secure; the scan helps with that.
