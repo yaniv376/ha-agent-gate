@@ -826,6 +826,23 @@ for _p in (OPT.get("redact_patterns") or []):
 _REDACT_LOCK = threading.Lock()
 
 
+def register_secret(value, min_len=12):
+    """Hide a concrete value the gate knows (its own endpoint token, the report token,
+    the upstream MCP server's private path) wherever it shows up in a tool result:
+    add-on options, add-on logs, files. The upstream path is the only thing that
+    protects the MCP server behind the gate, so the agent must never see it."""
+    value = (value or "").strip()
+    if len(value) < min_len:
+        return
+    REDACT_RULES.append((re.compile(re.escape(value)), REDACT_MARK))
+
+
+for _seg in urlsplit(OPT.get("upstream_mcp_url") or "").path.split("/"):
+    register_secret(_seg)
+register_secret(ENDPOINT_TOKEN)
+register_secret(REPORT_TOKEN)
+
+
 def redact_text(text):
     """Return (text, count). Never raises; on error returns the input unchanged."""
     if not REDACT_ENABLED or not text:
@@ -2458,6 +2475,9 @@ SCAN_STRINGS = {
         "f_deviation": ("Add-on running without a window", "{names}", "Open a window for it or let the gate stop it."),
         "f_protection": ("Add-on with protection mode off", "{names}", "Turn protection mode back on in the add-on's settings unless it truly needs host access."),
         "f_hostnet": ("Add-on on the host network", "{names}", "Review whether host networking is needed; it bypasses the add-on sandbox."),
+        "f_mcp_on_lan": ("The MCP server is reachable on your network", "{name}",
+                         "Its private path is the only thing between the network and Home Assistant, and it goes around the gate. "
+                         "The gate hides the path from the agent; do not paste it anywhere else, and keep the network private."),
         "f_ports": ("Add-ons with ports exposed on the host", "{names}", "Close ports you do not use from outside (add-on Configuration, Network)."),
         "f_tokens": ("Long-lived access tokens", "{n} token(s): {names}", "Delete tokens you no longer use (your profile, Security tab)."),
         "f_backup_old": ("Last full backup is old", "{age} hours.", "Run a backup (Settings, Backups) or set backup_policy to always."),
@@ -2504,6 +2524,9 @@ SCAN_STRINGS = {
         "f_deviation": ("תוסף רץ בלי חלון", "{names}", "פתח לו חלון או תן לשער לעצור אותו."),
         "f_protection": ("תוסף עם מצב הגנה כבוי", "{names}", "החזר את מצב ההגנה בהגדרות התוסף, אלא אם הוא באמת צריך גישה למארח."),
         "f_hostnet": ("תוסף ברשת המארח", "{names}", "בדוק אם נדרש; זה עוקף את ארגז החול של התוסף."),
+        "f_mcp_on_lan": ("שרת ה-MCP נגיש ברשת הביתית", "{name}",
+                         "הנתיב הסודי שלו הוא ההגנה היחידה בינו לבין Home Assistant, והוא עוקף את השער. "
+                         "השער מסתיר את הנתיב מהסוכן; אל תדביק אותו במקום אחר, ושמור על הרשת פרטית."),
         "f_ports": ("תוספים עם פורטים פתוחים במארח", "{names}", "סגור פורטים שלא נחוצים מבחוץ (הגדרות התוסף, רשת)."),
         "f_tokens": ("טוקנים ארוכי טווח", "{n} טוקנים: {names}", "מחק טוקנים שכבר לא בשימוש (הפרופיל שלך, לשונית אבטחה)."),
         "f_backup_old": ("הגיבוי המלא האחרון ישן", "{age} שעות.", "הרץ גיבוי (הגדרות, גיבויים) או קבע מדיניות גיבוי always."),
@@ -2909,6 +2932,15 @@ def run_scan(source="manual"):
             findings.append(_finding("info", "f_tunnel", names=", ".join(tunnels)))
         if addon_updates:
             findings.append(_finding("info", "f_update_addons", names=", ".join(addon_updates)))
+        mcp = next((a for a in addons if a.get("slug") == MCP_SLUG), None)
+        if mcp and mcp.get("state") == "started":
+            try:
+                code, info = _sup_request("GET", f"/addons/{MCP_SLUG}/info", timeout=20)
+                info = info.get("data", {}) if code == 200 else {}
+                if info.get("host_network") or any(v for v in (info.get("network") or {}).values()):
+                    findings.append(_finding("info", "f_mcp_on_lan", name=mcp.get("name") or MCP_SLUG))
+            except Exception:
+                pass
         # 3. core / os / supervisor updates
         for path, key in (("/core/info", "f_update_core"), ("/os/info", "f_update_os"),
                           ("/supervisor/info", "f_update_sup")):
@@ -3545,7 +3577,7 @@ def main():
     if not UPSTREAM.hostname:
         log("WARNING: upstream_mcp_url is empty; gate tools work, HA tools will fail until it is set")
     else:
-        log(f"upstream: {UPSTREAM.scheme}://{UPSTREAM.hostname}:{UPSTREAM.port}{UPSTREAM.path}")
+        log(f"upstream: {UPSTREAM.scheme}://{UPSTREAM.hostname}:{UPSTREAM.port}/[path hidden]")
     if mqtt is not None and SUPERVISOR_TOKEN:
         try:
             MQTT_CLIENT = mqtt_connect()

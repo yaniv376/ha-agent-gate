@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.1
+
+- **The MCP server's private path is hidden from the agent.** The gate's own
+  log printed the upstream URL with its private path, and the agent can read
+  add-on logs. That path is the only thing protecting the MCP server, which
+  listens on the LAN and sits *behind* the gate: with it, the gate can be
+  bypassed. The log now prints the upstream without the path, and the path,
+  the gate's endpoint token and the report token are redacted from every tool
+  result (add-on logs, options, files).
+- **New scan finding** when the MCP server add-on is reachable on the network
+  (host network or a published port): explains what that means and what to
+  keep private.
+
 ## 0.6.0
 
 Security release. Thanks to Matt Abate (@mattabate) for reading the code and

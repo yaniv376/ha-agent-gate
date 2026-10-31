@@ -393,7 +393,9 @@ Defences
   `shell_command` to `configuration.yaml`, reload, and run it inside Home
   Assistant's own container, which also holds a Supervisor token. A commands
   window can reach the network of the other add-ons, including the MCP server
-  behind the gate, if that server accepts unauthenticated connections. The
+  behind the gate, whose only protection is its private path. The gate hides
+  that path from the agent (log, options and files are redacted), but anyone
+  who has it, on the LAN, goes around the gate. The
   gate makes the obvious routes to itself fail (protections 2 and 8) and
   reports what it can detect (protection 6: options changed, gate down), but
   inside an open window it cannot make a determined agent harmless. Keep
