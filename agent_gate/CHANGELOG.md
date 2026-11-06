@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.2
+
+- **Commands accept the mechanism's switch entity id.** `cmd/open`, `cmd/close`
+  and `cmd/extend` take `{"mech": "switch.agent_gate_mech_ssh"}` as well as
+  `{"mech": "ssh"}`. A custom dashboard can now list every mechanism with
+  auto-entities and build its buttons from `this.entity_id`, so a mechanism the
+  scan adds shows up there without editing the dashboard.
+
 ## 0.6.1
 
 - **The MCP server's private path is hidden from the agent.** The gate's own

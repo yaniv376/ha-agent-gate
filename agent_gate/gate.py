@@ -1678,7 +1678,10 @@ def _mech_keys(spec):
         return [m["key"] for m in MECHANISMS if m["default_on"]]
     if spec == "open":
         return list(active_windows().keys())
-    return [k for k in str(spec).split("+") if k in MECH_BY_KEY]
+    # A key ("ssh") or the mechanism's switch entity id ("switch.agent_gate_mech_ssh"),
+    # so a dashboard can build one generic card per switch (auto-entities "this.entity_id").
+    keys = [k.strip().removeprefix("switch.agent_gate_mech_") for k in str(spec).split("+")]
+    return [k for k in keys if k in MECH_BY_KEY]
 
 
 def on_mqtt_message(client, userdata, msg):
