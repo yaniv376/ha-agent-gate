@@ -139,6 +139,13 @@ def load_options():
         "agent_files_write_dirs": ["/homeassistant/agents/reports"],
         "agent_files_read_dirs": ["/homeassistant/agents"],
         "agent_files_max_kb": 2048,
+        # Files the shell must not read: credentials Home Assistant and other add-ons
+        # keep on disk. See hide_secret_paths().
+        "shell_hide_secrets": True,
+        "shell_hidden_paths": ["/homeassistant/.storage", "/homeassistant/secrets.yaml",
+                               "/homeassistant/.mcp_proxy_*",
+                               "/homeassistant/zigbee2mqtt/configuration*.yaml",
+                               "/homeassistant/zigbee2mqtt/secret.yaml"],
     }
     try:
         with open(OPTIONS_PATH, encoding="utf-8") as f:
@@ -476,6 +483,32 @@ def harden_self():
         log(f"harden: image files now belong to uid {PRIVATE_UID} ({time.time() - t0:.1f}s)")
     except Exception as e:
         log(f"harden: image chown failed: {e}")
+
+
+def hide_secret_paths():
+    """Make credential files unreadable for gate_run_command.
+    The sandboxed shell is uid 0 without CAP_DAC_OVERRIDE, so it can open root-owned
+    files (it is their owner) but not files owned by PRIVATE_UID with mode 0600/0700.
+    Home Assistant, Zigbee2MQTT and the file editor add-ons run as root WITH that
+    capability, so they keep reading and writing these files as before. A folder
+    (like .storage) is protected as a whole, including files created later; single
+    files are re-checked before every command because some programs replace them."""
+    if not OPT.get("shell_hide_secrets", True) or os.getuid() != 0:
+        return
+    import glob
+    for pattern in OPT.get("shell_hidden_paths") or []:
+        for path in glob.glob(str(pattern)):
+            try:
+                st = os.lstat(path)
+                if os.path.islink(path):
+                    continue
+                mode = 0o700 if os.path.isdir(path) else 0o600
+                if st.st_uid != PRIVATE_UID or st.st_gid != PRIVATE_UID:
+                    os.lchown(path, PRIVATE_UID, PRIVATE_UID)
+                if (st.st_mode & 0o777) != mode:
+                    os.chmod(path, mode)
+            except OSError as e:
+                log(f"hide secrets: {path}: {e}")
 
 
 def _sup_request(method, path, body=None, timeout=30):
@@ -3476,6 +3509,7 @@ def gate_status_text():
 
 def execute_command(command, cwd, timeout, approval_id=None):
     cwd = cwd or ("/addons" if os.path.isdir("/addons") else "/")
+    hide_secret_paths()
     started = time.time()
     try:
         env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -3710,6 +3744,7 @@ def main():
     global MQTT_CLIENT
     os.makedirs(DATA_DIR, exist_ok=True)
     harden_self()
+    hide_secret_paths()
     save_state()
     port = int(OPT.get("listen_port") or 9584)
     log(f"mechanisms: {[m['key'] for m in MECHANISMS]}")

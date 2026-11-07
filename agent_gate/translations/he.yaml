@@ -74,6 +74,12 @@ configuration:
   agent_files_max_kb:
     name: קבצי דוחות - גודל מרבי (KB)
     description: הקובץ הגדול ביותר ש-gate_agent_files רשאי לכתוב.
+  shell_hide_secrets:
+    name: הסתרת סיסמאות מהפקודות
+    description: לפני כל פקודה, הנתיבים שלמטה הופכים ללא קריאים עבור gate_run_command. ל-HA ולתוספים אחרים נשארת גישה מלאה.
+  shell_hidden_paths:
+    name: נתיבים מוסתרים מהפקודות
+    description: קבצים או תיקיות (אפשר תבניות glob) שיש בהם סיסמאות, למשל .storage ו-secrets.yaml.
   mechanisms:
     name: מנגנונים
     description: כל רשומה היא נתיב גישה שהשער שולט בו (מפתח, שם לתצוגה, התוספים שהוא מדליק ומכבה, והאם חלון מלא כולל אותו).

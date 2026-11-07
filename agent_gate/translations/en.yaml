@@ -74,6 +74,12 @@ configuration:
   agent_files_max_kb:
     name: Report files - size limit (KB)
     description: Largest file gate_agent_files may write.
+  shell_hide_secrets:
+    name: Hide credentials from the shell
+    description: Before every command, make the paths below unreadable for gate_run_command. Home Assistant and other add-ons keep full access.
+  shell_hidden_paths:
+    name: Paths hidden from the shell
+    description: Files or folders (glob patterns allowed) with credentials, for example .storage and secrets.yaml.
   mechanisms:
     name: Mechanisms
     description: Each entry is an access path the gate controls (key, display name, the add-ons it starts and stops, and whether a full window includes it).

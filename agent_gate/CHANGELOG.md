@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.4
+
+- **The shell can no longer read stored credentials (protection 9).** The
+  sandboxed shell runs as root without CAP_DAC_OVERRIDE, so it could still open
+  every root-owned file, including `.storage` (where Home Assistant keeps its
+  MQTT login), `secrets.yaml`, the MCP proxy secrets and Zigbee2MQTT's
+  configuration. With an MQTT login, a command could send `cmd/open` to the
+  gate and open more mechanisms by itself. Before every command the gate now
+  gives the paths in `shell_hidden_paths` to its private uid with mode
+  0600/0700: the shell gets "permission denied", while Home Assistant,
+  Zigbee2MQTT and the editor add-ons, which run with that capability, read and
+  write them as before. A folder is protected as a whole, including new files.
+  Turn off with `shell_hide_secrets: false`.
+- Note: a Mosquitto ACL alone does not protect the gate topics on the official
+  Mosquitto add-on, because its auth plugin allows every topic before the ACL
+  file is consulted.
+
 ## 0.6.3
 
 - **New mechanism: Report files (`reports`).** A scheduled job that only needs

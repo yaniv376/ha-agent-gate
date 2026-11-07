@@ -1,6 +1,6 @@
 name: "Agent Gate"
 description: "On/off access gate for AI agents: MCP write lock, shell command tool, controlled add-ons, timed windows"
-version: "0.6.3"
+version: "0.6.4"
 slug: "agent_gate"
 url: "https://github.com/yaniv376/ha-agent-gate"
 arch:
@@ -95,6 +95,13 @@ options:
   agent_files_read_dirs:
     - "/homeassistant/agents"
   agent_files_max_kb: 2048
+  shell_hide_secrets: true
+  shell_hidden_paths:
+    - "/homeassistant/.storage"
+    - "/homeassistant/secrets.yaml"
+    - "/homeassistant/.mcp_proxy_*"
+    - "/homeassistant/zigbee2mqtt/configuration*.yaml"
+    - "/homeassistant/zigbee2mqtt/secret.yaml"
   mechanisms:
     - key: "ssh"
       name: "SSH"
@@ -148,6 +155,9 @@ schema:
   agent_files_read_dirs:
     - str?
   agent_files_max_kb: int(1,20480)?
+  shell_hide_secrets: bool?
+  shell_hidden_paths:
+    - str?
   mechanisms:
     - key: str
       name: str
