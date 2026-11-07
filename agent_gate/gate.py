@@ -135,6 +135,10 @@ def load_options():
         "redact_patterns": [],
         "canary_enabled": True,
         "canary_files": ["/homeassistant/secrets_backup.yaml", "/share/agent_gate/credentials.txt"],
+        # 'reports' mechanism: file access without a shell (gate_agent_files).
+        "agent_files_write_dirs": ["/homeassistant/agents/reports"],
+        "agent_files_read_dirs": ["/homeassistant/agents"],
+        "agent_files_max_kb": 2048,
     }
     try:
         with open(OPTIONS_PATH, encoding="utf-8") as f:
@@ -155,6 +159,9 @@ LANG = "he" if str(OPT.get("language") or "en").lower().startswith("he") else "e
 BUILTIN_MECHANISMS = [
     {"key": "ha_write", "name": "כתיבה ב-HA" if LANG == "he" else "HA write", "addons": [], "default_on": True},
     {"key": "commands", "name": "פקודות" if LANG == "he" else "Commands", "addons": [], "default_on": True},
+    # File access without a shell: read in agent_files_read_dirs, write in agent_files_write_dirs.
+    # Meant for unattended scheduled windows, where a full shell would be too much power.
+    {"key": "reports", "name": "קבצי דוחות" if LANG == "he" else "Report files", "addons": [], "default_on": False},
 ]
 MECHANISMS = BUILTIN_MECHANISMS + [
     {"key": m.get("key"), "name": m.get("name") or m.get("key"),
@@ -610,7 +617,7 @@ for p in OPT.get("destructive_patterns", []) or []:
     except re.error as e:
         log(f"bad destructive pattern {p!r}: {e}")
 
-GATE_TOOL_NAMES = ("gate_status", "gate_run_command")
+GATE_TOOL_NAMES = ("gate_status", "gate_run_command", "gate_agent_files")
 # Write tools that may mention the gate's entities without being able to act on them:
 # a dashboard card is tapped by the user, a label or category is cosmetic.
 PROTECTED_EXEMPT = set(OPT.get("protected_exempt_tools") or [
@@ -1040,6 +1047,7 @@ def actual_states():
         out[m["key"]] = {"running": any(s == "started" for s in states.values()), "addons": states}
     out["ha_write"] = {"running": is_active("ha_write")}
     out["commands"] = {"running": is_active("commands")}
+    out["reports"] = {"running": is_active("reports")}
     return out
 
 
@@ -3177,6 +3185,21 @@ GATE_TOOLS = [
                                     "timeout_seconds": {"type": "integer", "default": 60, "maximum": 600},
                                     "approval_id": {"type": "string",
                                                     "description": "re-run a held command after approval"}}}},
+    {"name": "gate_agent_files",
+     "description": "Agent Gate: list, read or write agent files without a shell. Allowed while the "
+                    "'reports' or 'commands' mechanism is open. list/read work inside the configured "
+                    "read folders; write (mode w or a) works only inside the configured write folders, "
+                    "for .html .md .txt .json .jsonl .csv files. No delete, move or rename. "
+                    "Call with action 'roots' to see the allowed folders.",
+     "inputSchema": {"type": "object",
+                     "properties": {"action": {"type": "string", "enum": ["roots", "list", "read", "write"]},
+                                    "path": {"type": "string", "description": "absolute path of a folder (list) or file"},
+                                    "content": {"type": "string", "description": "text to write (write)"},
+                                    "mode": {"type": "string", "enum": ["w", "a"], "default": "w",
+                                             "description": "w = create or replace, a = append"},
+                                    "offset": {"type": "integer", "default": 0, "description": "read: start byte"},
+                                    "max_bytes": {"type": "integer", "default": 100000, "description": "read: at most this many bytes"}},
+                     "required": ["action"]}},
 ]
 
 
@@ -3484,9 +3507,123 @@ def execute_command(command, cwd, timeout, approval_id=None):
     return tool_text(text, rc != 0)
 
 
+# --------------------------------------------------------------------------
+# gate_agent_files: shell-free file access for the 'reports' mechanism
+# --------------------------------------------------------------------------
+AGENT_WRITE_EXT = (".html", ".htm", ".md", ".txt", ".json", ".jsonl", ".csv")
+_SECRET_NAME = re.compile(r"(^\.env|secret|token|passw|credential|\.key$|\.pem$|id_rsa|\.storage)", re.I)
+
+
+def _agent_dirs(key):
+    out = []
+    for d in OPT.get(key) or []:
+        d = str(d or "").strip()
+        if d.startswith("/"):
+            out.append(os.path.realpath(d))
+    return out
+
+
+def _under(path, roots):
+    return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
+
+
+def _agent_path(raw, roots):
+    """Resolve a requested path; None unless it lies inside one of roots (symlinks resolved)."""
+    raw = str(raw or "").strip()
+    if not raw.startswith("/") or "\x00" in raw:
+        return None
+    real = os.path.realpath(raw)
+    if not _under(real, roots):
+        return None
+    if any(p in real.lower() for p in PROTECTED):
+        return None
+    rel = real[len(next(r for r in roots if _under(real, [r]))):]
+    if any(_SECRET_NAME.search(part) for part in rel.split("/") if part):
+        return None
+    return real
+
+
+def agent_files(args):
+    action = (args.get("action") or "").strip()
+    read_roots = _agent_dirs("agent_files_read_dirs") + _agent_dirs("agent_files_write_dirs")
+    write_roots = _agent_dirs("agent_files_write_dirs")
+    if action == "roots":
+        return tool_text("read: " + (", ".join(read_roots) or "none") + "\nwrite: " + (", ".join(write_roots) or "none"))
+    if action == "list":
+        p = _agent_path(args.get("path"), read_roots)
+        if not p or not os.path.isdir(p):
+            return tool_text("DENIED or not a folder: list works only inside the read folders.", True)
+        lines = []
+        for name in sorted(os.listdir(p)):
+            if _SECRET_NAME.search(name) or any(x in name.lower() for x in PROTECTED):
+                continue
+            fp = os.path.join(p, name)
+            try:
+                st = os.lstat(fp)
+            except OSError:
+                continue
+            kind = "dir " if os.path.isdir(fp) else "file"
+            lines.append(f"{kind} {st.st_size:>9} {datetime.fromtimestamp(st.st_mtime, timezone.utc).strftime('%Y-%m-%d %H:%M')} {name}")
+        return tool_text("\n".join(lines) or "(empty)")
+    if action == "read":
+        p = _agent_path(args.get("path"), read_roots)
+        if not p or not os.path.isfile(p):
+            return tool_text("DENIED or not a file: read works only inside the read folders.", True)
+        try:
+            off = max(0, int(args.get("offset") or 0))
+            n = max(1, min(200000, int(args.get("max_bytes") or 100000)))
+        except Exception:
+            off, n = 0, 100000
+        size = os.path.getsize(p)
+        with open(p, "rb") as f:
+            f.seek(off)
+            data = f.read(n).decode("utf-8", "replace")
+        text, k = redact_text(data)
+        note_redactions("gate_agent_files", k)
+        more = f"\n... ({size - off - n} more bytes, read again with offset={off + n})" if off + n < size else ""
+        return tool_text(text + more)
+    if action == "write":
+        p = _agent_path(args.get("path"), write_roots)
+        if not p:
+            return tool_text("DENIED: write works only inside the write folders: " + (", ".join(write_roots) or "none"), True)
+        if not p.lower().endswith(AGENT_WRITE_EXT):
+            return tool_text("DENIED: only " + " ".join(AGENT_WRITE_EXT) + " files can be written.", True)
+        if os.path.islink(args.get("path")) or os.path.isdir(p):
+            return tool_text("DENIED: not a regular file path.", True)
+        content = args.get("content")
+        if not isinstance(content, str):
+            return tool_text("content (text) is required", True)
+        mode = "a" if args.get("mode") == "a" else "w"
+        limit = int(OPT.get("agent_files_max_kb") or 2048) * 1024
+        new_size = len(content.encode("utf-8")) + (os.path.getsize(p) if mode == "a" and os.path.exists(p) else 0)
+        if new_size > limit:
+            return tool_text(f"DENIED: file would exceed {limit // 1024} KB.", True)
+        if not os.path.isdir(os.path.dirname(p)):
+            return tool_text("DENIED: the folder does not exist (folders are not created).", True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_APPEND if mode == "a" else os.O_TRUNC)
+        fd = os.open(p, flags, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        with STATE_LOCK:
+            wid = STATE.get("window_id")
+        _append_jsonl(COMMANDS_PATH, {"ts": iso(now_utc()), "window_id": wid,
+                                      "command": f"[gate_agent_files {mode}] {p}", "rc": 0,
+                                      "bytes": len(content)})
+        return tool_text(f"written ({mode}): {p}, {os.path.getsize(p)} bytes")
+    return tool_text("action must be roots, list, read or write", True)
+
+
 def run_gate_tool(name, args):
     if name == "gate_status":
         return tool_text(gate_status_text())
+    if name == "gate_agent_files":
+        if not (is_active("reports") or is_active("commands")):
+            return tool_text("DENIED: Agent Gate is locked (the 'reports' and 'commands' mechanisms are off). "
+                             "Ask the user to open the gate from the dashboard, then retry.", True)
+        try:
+            return agent_files(args or {})
+        except Exception as e:
+            return tool_text(f"error: {e}", True)
     if name != "gate_run_command":
         return tool_text(f"unknown gate tool {name}", True)
     if not is_active("commands"):

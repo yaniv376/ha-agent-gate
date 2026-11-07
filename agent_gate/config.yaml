@@ -1,6 +1,6 @@
 name: "Agent Gate"
 description: "On/off access gate for AI agents: MCP write lock, shell command tool, controlled add-ons, timed windows"
-version: "0.6.2"
+version: "0.6.3"
 slug: "agent_gate"
 url: "https://github.com/yaniv376/ha-agent-gate"
 arch:
@@ -90,6 +90,11 @@ options:
   canary_files:
     - "/homeassistant/secrets_backup.yaml"
     - "/share/agent_gate/credentials.txt"
+  agent_files_write_dirs:
+    - "/homeassistant/agents/reports"
+  agent_files_read_dirs:
+    - "/homeassistant/agents"
+  agent_files_max_kb: 2048
   mechanisms:
     - key: "ssh"
       name: "SSH"
@@ -138,6 +143,11 @@ schema:
   canary_enabled: bool?
   canary_files:
     - str?
+  agent_files_write_dirs:
+    - str?
+  agent_files_read_dirs:
+    - str?
+  agent_files_max_kb: int(1,20480)?
   mechanisms:
     - key: str
       name: str

@@ -65,6 +65,15 @@ configuration:
   canary_files:
     name: Decoy file paths
     description: Where to place the decoys. Use names that look valuable and that no real task needs.
+  agent_files_write_dirs:
+    name: Report files - write folders
+    description: Folders where gate_agent_files may create or append report files (the Report files mechanism). Nothing outside them can be written.
+  agent_files_read_dirs:
+    name: Report files - read folders
+    description: Folders gate_agent_files may list and read. The write folders are always readable too.
+  agent_files_max_kb:
+    name: Report files - size limit (KB)
+    description: Largest file gate_agent_files may write.
   mechanisms:
     name: Mechanisms
     description: Each entry is an access path the gate controls (key, display name, the add-ons it starts and stops, and whether a full window includes it).

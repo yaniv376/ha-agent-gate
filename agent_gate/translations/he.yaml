@@ -65,6 +65,15 @@ configuration:
   canary_files:
     name: נתיבי קבצי הפיתיון
     description: איפה לשים את הפיתיונות. שמות שנראים שווים, ושאף משימה אמיתית לא צריכה.
+  agent_files_write_dirs:
+    name: קבצי דוחות - תיקיות כתיבה
+    description: תיקיות שבהן gate_agent_files רשאי ליצור קובצי דוח או להוסיף להם. מחוץ להן אין כתיבה.
+  agent_files_read_dirs:
+    name: קבצי דוחות - תיקיות קריאה
+    description: תיקיות ש-gate_agent_files רשאי להציג ולקרוא. תיקיות הכתיבה תמיד קריאות.
+  agent_files_max_kb:
+    name: קבצי דוחות - גודל מרבי (KB)
+    description: הקובץ הגדול ביותר ש-gate_agent_files רשאי לכתוב.
   mechanisms:
     name: מנגנונים
     description: כל רשומה היא נתיב גישה שהשער שולט בו (מפתח, שם לתצוגה, התוספים שהוא מדליק ומכבה, והאם חלון מלא כולל אותו).

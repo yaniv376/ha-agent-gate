@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.3
+
+- **New mechanism: Report files (`reports`).** A scheduled job that only needs
+  to read data and save a report no longer has to open the full shell. The new
+  tool `gate_agent_files` lists, reads and writes files without a shell:
+  reading inside `agent_files_read_dirs`, writing (replace or append) only
+  inside `agent_files_write_dirs`, only text report types (.html .md .txt
+  .json .jsonl .csv), no delete, move or rename, symlinks resolved, secret-like
+  names (.env, token, secret, password, key files, .storage) refused, output
+  redacted. It works while `reports` or `commands` is open. Use it for
+  automations that open the gate on a schedule: `{"mech": "reports"}` instead
+  of `{"mech": "commands"}`. An unattended shell window can read Home
+  Assistant's stored credentials and use them to open more of the gate; a
+  `reports` window cannot.
+
 ## 0.6.2
 
 - **Commands accept the mechanism's switch entity id.** `cmd/open`, `cmd/close`
