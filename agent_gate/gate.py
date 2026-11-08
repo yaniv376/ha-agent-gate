@@ -60,7 +60,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.6.5"
+VERSION = "0.6.6"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -550,14 +550,28 @@ def addon_action(slug, action):
     if slug == SELF_SLUG:
         log(f"refusing to {action} myself ({slug})")
         return False
-    try:
-        code, data = _sup_request("POST", f"/addons/{slug}/{action}", body={}, timeout=120)
+    # The Supervisor refuses a second job on an add-on while one is running
+    # ("Another job is running for job group ..."), e.g. a stop pressed while
+    # the add-on is still starting. Wait for that job and try again.
+    deadline = time.time() + ADDON_BUSY_RETRY_SECONDS
+    while True:
+        try:
+            code, data = _sup_request("POST", f"/addons/{slug}/{action}", body={}, timeout=120)
+        except Exception as e:
+            log(f"addon {action} {slug} failed: {e}")
+            return False
         ok = code == 200 and data.get("result") == "ok"
+        busy = (not ok) and "another job is running" in str(data.get("message", "")).lower()
+        if busy and time.time() < deadline:
+            time.sleep(3)
+            continue
         log(f"addon {action} {slug}: {'ok' if ok else data}")
         return ok
-    except Exception as e:
-        log(f"addon {action} {slug} failed: {e}")
-        return False
+
+
+ADDON_BUSY_RETRY_SECONDS = 90
+# Supervisor states in which an add-on is running or on its way to running.
+RUNNING_OR_STARTING = ("started", "startup")
 
 
 def create_full_backup(name):
@@ -1186,7 +1200,7 @@ def apply_addons(keys=None):
             st = addon_state(slug)
             if want and st != "started":
                 jobs.append((slug, "start"))
-            elif not want and st == "started":
+            elif not want and st in RUNNING_OR_STARTING:
                 jobs.append((slug, "stop"))
     threads = [threading.Thread(target=addon_action, args=j, daemon=True) for j in jobs]
     for t in threads:
@@ -1209,6 +1223,11 @@ def describe_windows():
 
 
 OPEN_LOCK = threading.Lock()
+# Bumped by every close. An open that is still in progress (backup, slow
+# add-on starts) compares it before and after, so a lock pressed meanwhile
+# wins instead of being undone when the open finishes. Guarded by STATE_LOCK.
+_CLOSE_GEN = [0]
+_OPENING_KEYS = set()   # mechanisms an in-progress open is about to start
 
 
 def parallel_backup_job(name):
@@ -1239,6 +1258,9 @@ def open_mechs(keys, minutes, source="dashboard"):
     try:
         new_end = iso(now_utc() + timedelta(minutes=minutes)) if minutes else None
         with STATE_LOCK:
+            gen0 = _CLOSE_GEN[0]
+            _OPENING_KEYS.clear()
+            _OPENING_KEYS.update(keys)
             first_open = not STATE.get("windows")
             if first_open:
                 STATE["window_id"] = uuid.uuid4().hex[:8]
@@ -1273,6 +1295,26 @@ def open_mechs(keys, minutes, source="dashboard"):
                     publish_all()
                     return
         with STATE_LOCK:
+            if _CLOSE_GEN[0] != gen0:
+                # Locked while the backup ran: the lock wins, nothing opens.
+                if backup:
+                    STATE["backup"] = backup
+                    STATE["last_backup_at"] = iso(now_utc())
+                STATE["phase"] = None
+                if STATE["mode"] == "opening":
+                    STATE["mode"] = "locked"
+                _recompute_mode()
+                save_state()
+                cancelled_early = True
+            else:
+                cancelled_early = False
+        if cancelled_early:
+            log(f"open of {keys} cancelled: locked while opening")
+            _append_jsonl(HISTORY_PATH, {"event": "open_cancelled", "window_id": wid, "ts": iso(now_utc()),
+                                         "mechanisms": keys, "source": source})
+            publish_all()
+            return
+        with STATE_LOCK:
             for k in keys:
                 prev = STATE["windows"].get(k, {})
                 STATE["windows"][k] = {"end": new_end, "opened_at": prev.get("opened_at") or iso(now_utc())}
@@ -1286,6 +1328,28 @@ def open_mechs(keys, minutes, source="dashboard"):
             _bg(parallel_backup_job, f"agent_gate_{datetime.now().strftime('%Y%m%d_%H%M')}")
         publish_all()   # the new end shows on the dashboard at once; starting add-ons can take a while
         apply_addons(keys)
+        # A lock (or close) may have arrived while the add-ons were starting.
+        # Its stop could not touch an add-on that was still starting, so an
+        # add-on can be running now without a window. Stop those again and
+        # report only what is really still open.
+        with STATE_LOCK:
+            closed_meanwhile = _CLOSE_GEN[0] != gen0
+            still_open = [k for k in keys if k in STATE["windows"]]
+            _OPENING_KEYS.clear()
+        if closed_meanwhile:
+            cancelled = [k for k in keys if k not in still_open]
+            if cancelled:
+                log(f"closed while opening: stopping {cancelled} again")
+                for k in cancelled:
+                    _STOPPING[k] = time.time()
+                apply_addons(cancelled)
+                publish_all()
+            keys = still_open
+            if not keys:
+                _append_jsonl(HISTORY_PATH, {"event": "open_cancelled", "window_id": wid, "ts": iso(now_utc()),
+                                             "mechanisms": cancelled, "source": source})
+                log(f"open of {cancelled} cancelled: locked while opening")
+                return
         _append_jsonl(HISTORY_PATH, {"event": "open", "window_id": wid, "ts": iso(now_utc()),
                                      "mechanisms": keys, "minutes": minutes, "source": source,
                                      "backup": backup})
@@ -1296,6 +1360,8 @@ def open_mechs(keys, minutes, source="dashboard"):
         publish_all()
         log(f"OPEN {keys} for {minutes or 'unlimited'} min")
     finally:
+        with STATE_LOCK:
+            _OPENING_KEYS.clear()
         OPEN_LOCK.release()
 
 
@@ -1346,6 +1412,8 @@ def close_mechs(keys, reason="dashboard"):
     """Close the given mechanisms. When the last one closes, the session ends
     with a summary notification."""
     with STATE_LOCK:
+        _CLOSE_GEN[0] += 1
+        opening = [k for k in keys if k in _OPENING_KEYS]
         closed = [k for k in keys if k in STATE["windows"]]
         for k in closed:
             del STATE["windows"][k]
@@ -1358,9 +1426,9 @@ def close_mechs(keys, reason="dashboard"):
         else:
             STATE["mode"] = "open"
         save_state()
-    for k in closed:
+    for k in set(closed) | set(opening):
         _STOPPING[k] = time.time()
-    apply_addons(closed if closed else None)
+    apply_addons(sorted(set(closed) | set(opening)) if (closed or opening) else None)
     publish_all()
     if closed and not session_over:
         _append_jsonl(HISTORY_PATH, {"event": "close", "window_id": wid, "ts": iso(now_utc()),
@@ -1492,7 +1560,7 @@ def handle_deviation(dev):
         log(f"deviation grace over, enforcing: {dev}")
         for k in dev:
             for slug in MECH_BY_KEY.get(k, {}).get("addons", []):
-                if addon_state(slug) == "started":
+                if addon_state(slug) in RUNNING_OR_STARTING:
                     addon_action(slug, "stop")
         with STATE_LOCK:
             STATE["deviation_since"] = None

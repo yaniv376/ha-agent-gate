@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.6
+
+- **A lock pressed while the gate is still opening now wins.** Before, a lock
+  that arrived during the backup before opening was forgotten and the whole
+  window opened when the backup finished. A lock that arrived while slow
+  add-ons (Studio Code Server takes about 25 s) were still starting skipped
+  them, because they were not "started" yet; they came up a few seconds later
+  with no window and showed as a deviation. Every close now bumps a counter
+  that the open checks before and after starting add-ons: if a close came in,
+  nothing opens, add-ons that started anyway are stopped again, and no "open"
+  notification is sent.
+- **Stopping an add-on that is still starting now works.** The Supervisor
+  refuses a second job ("Another job is running") while a start runs. Start
+  and stop now wait for that job and retry for up to 90 s, and add-ons in the
+  `startup` state count as running when the gate locks or enforces a
+  deviation.
+
 ## 0.6.5
 
 - **A script can no longer send the gate a command (protection 2).** The gate
