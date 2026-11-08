@@ -35,6 +35,9 @@ configuration:
   read_tool_patterns:
     name: Read-only tool patterns
     description: MCP tools matching these patterns are always allowed (they only read).
+  read_tool_exclude:
+    name: Read tools that still need a window
+    description: Tools that match a read pattern but are refused unless HA write is open. Default ha_get_camera_image, so a locked gate gives no camera pictures.
   protected_patterns:
     name: Protected patterns
     description: A tool call or command mentioning any of these is refused, even in an open window. Keeps the agent away from the gate itself.

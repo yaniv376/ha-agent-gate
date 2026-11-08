@@ -143,6 +143,11 @@ buttons. Then:
 `destructive_patterns` (rm, mv, docker, reboot ...) are held: the agent gets
 an `approval_id` and you get "Approve command?" on the phone and on the
 dashboard. Unanswered approvals expire after `approval_timeout_minutes`.
+A held command must fit on the phone (400 characters) and may not contain
+invisible or direction-control characters, so what you read is what runs.
+The dashboard's *Approve* button works only while exactly one command waits;
+with more, approve each from its own phone notification. *Reject all* always
+works.
 
 **Closing.** A mechanism closes from its button, its timer, *Lock now*, or
 on its own when a defence fires. Its add-ons stop. When the last mechanism
@@ -190,7 +195,19 @@ are the exception, so the agent can still build cards that show the gate.
 The check is a text match, so it is also run with quotes, backslashes and
 whitespace stripped (`agent_g""ate` is still caught), and a Supervisor
 service call (`hassio.*`) whose arguments contain a Jinja template is refused
-outright, because a slug assembled at render time cannot be matched. It is
+outright, because a slug assembled at render time cannot be matched. Escapes
+written inside strings (`agent\u005fgate`) are decoded before the match.
+
+The gate takes its commands on MQTT (`agent_gate/...`) and from the phone's
+notification buttons. With HA write open, a script or automation could build
+that topic at run time (`'agent' ~ '_gate/cmd/open'`), so these write calls
+are refused too: anything that mentions MQTT together with a Jinja template or
+a YAML tag (`!include`, `!secret`, `!env_var`, `!input`), any MQTT discovery
+message (`homeassistant/...`, whose `~` abbreviation can spell the topic), and
+firing `mobile_app_notification_action`. An automation that only triggers on
+that event is fine. Make a templated MQTT automation yourself in the UI.
+
+It is
 still a text match: treat it as protection against ordinary requests and
 mistakes, not as a boundary against an agent working to get around it. The
 boundary is protection 8.
@@ -358,6 +375,8 @@ Windows and backups
 Policy
 - `read_tool_patterns`: glob patterns of tools that pass while locked.
   Everything else is a write.
+- `read_tool_exclude` (`ha_get_camera_image`): tools that match a read
+  pattern but still need HA write open.
 - `protected_patterns` (`agent_gate`): substrings that mark a call as
   touching the gate; `protected_exempt_tools`: write tools allowed to
   mention it (dashboards, labels, categories).

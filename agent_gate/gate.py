@@ -39,6 +39,7 @@ import re
 import secrets
 import socketserver
 import ctypes
+import stat
 import subprocess
 import sys
 import threading
@@ -59,7 +60,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.5.6"
+VERSION = "0.6.5"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -125,6 +126,9 @@ def load_options():
         "read_tool_patterns": ["ha_get_*", "ha_list_*", "ha_search", "ha_config_get_*",
                                "ha_config_list_*", "ha_read_file", "ha_eval_template",
                                "ha_get_skill_guide", "ha_report_issue"],
+        # Tools that match a read pattern but must still wait for an open HA write
+        # window: a camera snapshot is a picture of the home, not a config read.
+        "read_tool_exclude": ["ha_get_camera_image"],
         "protected_patterns": ["agent_gate"],
         "destructive_patterns": [],
         "mechanisms": [],
@@ -337,6 +341,7 @@ STRINGS = {
         "btn_stop_now": "Stop it now",
         "approve_title": "Agent Gate: approve command?", "btn_approve": "Approve", "btn_reject": "Reject",
         "approve_hint": "Approve or reject with the buttons on the phone notification or on the Agent Gate dashboard.",
+        "approve_many": "{n} commands are waiting. The dashboard approves only when one waits: approve each one from its own phone notification.",
         "canary_title": "Agent Gate: TRAP TRIPPED, locked",
         "canary_body": "{what} touched a decoy ({where}). Nothing real was exposed. Every mechanism was closed. Review the agent's recent actions before opening again.",
         "anomaly_title": "Agent Gate: unusual activity",
@@ -361,6 +366,7 @@ STRINGS = {
         "btn_stop_now": "עצור עכשיו",
         "approve_title": "שער הסוכן: לאשר פקודה?", "btn_approve": "אשר", "btn_reject": "דחה",
         "approve_hint": "אישור או דחייה בכפתורים שבהתראת הטלפון או בדשבורד של השער.",
+        "approve_many": "ממתינות {n} פקודות. הדשבורד מאשר רק כשממתינה פקודה אחת: אשר כל פקודה מההתראה שלה בטלפון.",
         "canary_title": "שער הסוכן: המלכודת הופעלה, ננעל",
         "canary_body": "{what} נגע בפיתיון ({where}). שום דבר אמיתי לא נחשף. כל המנגנונים נסגרו. בדוק את הפעולות האחרונות של הסוכן לפני פתיחה מחדש.",
         "anomaly_title": "שער הסוכן: פעילות חריגה",
@@ -650,6 +656,12 @@ for p in OPT.get("destructive_patterns", []) or []:
     except re.error as e:
         log(f"bad destructive pattern {p!r}: {e}")
 
+APPROVAL_MAX_CHARS = 400
+# Control characters other than tab and newline, zero-width characters, bidi
+# embeddings/overrides/isolates, the BOM and Unicode tag characters.
+_HIDDEN_CHARS = re.compile("[\x00-\x08\x0b-\x1f\x7f\u200b-\u200f\u202a-\u202e"
+                           "\u2060-\u2069\ufeff\U000e0000-\U000e007f]")
+
 GATE_TOOL_NAMES = ("gate_status", "gate_run_command", "gate_agent_files")
 # Write tools that may mention the gate's entities without being able to act on them:
 # a dashboard card is tapped by the user, a label or category is cosmetic.
@@ -658,21 +670,49 @@ PROTECTED_EXEMPT = set(OPT.get("protected_exempt_tools") or [
     "ha_config_set_label", "ha_config_set_category"])
 
 
+READ_EXCLUDE = [p for p in OPT.get("read_tool_exclude", []) if p]
+
+
 def is_read_tool(name):
+    if any(fnmatch.fnmatchcase(name, p) for p in READ_EXCLUDE):
+        return False
     return any(fnmatch.fnmatchcase(name, p) for p in READ_PATTERNS)
 
 
 _QUOTE_NOISE = re.compile(r"""\\\\|\\"|["'`]|\\n|\\t|\s+""")
 _TEMPLATE = re.compile(r"\{\{|\{%")
+# YAML tags that pull text in from elsewhere at load time, out of sight of a string check.
+_YAML_TAG = re.compile(r"!(include\w*|secret|env_var|input)\b")
+_ESCAPE = re.compile(r"\\{1,2}(u[0-9a-f]{4}|x[0-9a-f]{2})")
+
+
+def _unescape(blob):
+    r"""Decode \uXXXX and \xXX written inside strings (a JSON payload kept as text):
+    'agent\u005fgate' becomes the gate's name when the payload is parsed later."""
+    def rep(m):
+        try:
+            return chr(int(m.group(1)[1:], 16))
+        except ValueError:
+            return m.group(0)
+    for _ in range(3):
+        new = _ESCAPE.sub(rep, blob)
+        if new == blob:
+            break
+        blob = new
+    return blob
 
 
 def touches_protected(arguments):
     r"""True when the call names the gate. Besides the plain substring, the text is
     also checked with quotes, backslashes and whitespace removed (agent_g""ate,
-    agent_\gate, agent_g ate), and a Supervisor service call (hassio.*) whose
-    arguments contain a Jinja template is refused outright: the slug could be
-    assembled at render time where no string check can see it."""
+    agent_\gate, agent_g ate) and with \u / \x escapes decoded, and a Supervisor
+    service call (hassio.*) whose arguments contain a Jinja template is refused
+    outright: the slug could be assembled at render time where no string check
+    can see it."""
     blob = json.dumps(arguments or {}, ensure_ascii=False).lower()
+    if any(p in blob for p in PROTECTED):
+        return True
+    blob = _unescape(blob)
     if any(p in blob for p in PROTECTED):
         return True
     flat = _QUOTE_NOISE.sub("", blob)
@@ -681,6 +721,36 @@ def touches_protected(arguments):
     if ("hassio." in blob or "domain:hassio" in flat) and _TEMPLATE.search(blob):
         return True
     return False
+
+
+def reaches_gate_controls(name, arguments):
+    """Reason string when a write call could send the gate a command without naming
+    it, else ''. The gate takes its commands on MQTT (agent_gate/...) and from the
+    phone's notification buttons (mobile_app_notification_action). A script or
+    automation can build that topic or that button id at run time ('agent' ~
+    '_gate'), and MQTT discovery can spell it with its '~' abbreviation, so
+    neither shows up as text here. Refused: MQTT together with a template or a
+    YAML tag, any MQTT discovery message, and firing the phone's button event."""
+    blob = _unescape(json.dumps(arguments or {}, ensure_ascii=False).lower())
+    flat = _QUOTE_NOISE.sub("", blob)
+    dynamic = bool(_TEMPLATE.search(blob) or _YAML_TAG.search(blob))
+    if "mqtt" in blob or "mqtt" in name.lower():
+        if dynamic:
+            return ("MQTT with a template or a YAML tag is refused: the topic or payload could "
+                    "address the gate at run time. Write the topic and payload as plain text, "
+                    "or make this change yourself in the Home Assistant UI.")
+        if '"homeassistant/' in blob:   # a string that starts with the discovery prefix
+            return ("publishing to the MQTT discovery prefix (homeassistant/...) is refused: a "
+                    "discovered entity could point its command topic at the gate.")
+    # Firing it: a script/automation action `event: mobile_app_notification_action`, or
+    # ha_call_event. An automation that only TRIGGERS on it (event_type: ...) is fine.
+    if ("event:mobile_app_notification_action" in flat
+            or (name == "ha_call_event" and "mobile_app_notification_action" in flat)):
+        return ("firing mobile_app_notification_action is refused: only the phone sends it, "
+                "and the gate treats it as the user's tap.")
+    if name == "ha_call_event" and dynamic:
+        return "events with templates are refused: the event could be assembled into a gate command."
+    return ""
 
 
 def is_destructive(command):
@@ -1033,6 +1103,10 @@ def evaluate_tool_call(name, arguments):
         return "allow", "read tool"
     if name not in PROTECTED_EXEMPT and (touches_protected(arguments) or any(p in name.lower() for p in PROTECTED)):
         return "deny", "touches the gate's own entities or topics; only the dashboard controls the gate"
+    if name not in PROTECTED_EXEMPT:
+        why = reaches_gate_controls(name, arguments)
+        if why:
+            return "deny", why
     if is_active("ha_write"):
         bad = anomaly_check(name, arguments)
         if bad:
@@ -1862,10 +1936,20 @@ def handle_action(payload):
         with STATE_LOCK:
             pend = STATE["pending"]
             if pid in ("LATEST", "ALL"):
-                # Dashboard buttons: no id at hand, act on the newest (or every) pending command.
+                # Dashboard buttons: no id at hand. Rejecting every pending command is
+                # always safe. Approving without an id is only done when exactly one
+                # command waits: with two, the newest may not be the one the user read
+                # (the agent can add one between reading and tapping), and approving
+                # all at once was never shown to the user one by one.
                 ids = sorted((k for k, v in pend.items() if v.get("status") == "pending"),
                              key=lambda k: pend[k].get("created", ""))
-                ids = ids[-1:] if pid == "LATEST" else ids
+                if verdict == "approved" and (pid == "ALL" or len(ids) != 1):
+                    log(f"approval {pid} refused: {len(ids)} commands pending, approve each from its phone notification")
+                    if len(ids) > 1:
+                        _bg(notify, T("approve_title"), T("approve_many", n=len(ids)))
+                    ids = []
+                elif pid == "LATEST":
+                    ids = ids[-1:]
             else:
                 ids = [pid]
             for k in ids:
@@ -3577,6 +3661,28 @@ def _agent_path(raw, roots):
     return real
 
 
+def _open_beneath(real, roots, flags, mode=0o644):
+    """Open `real` (already resolved by _agent_path) one component at a time from
+    its root, refusing a symlink at every step (O_NOFOLLOW). realpath() is only a
+    check at one moment: while the commands mechanism is open, the shell can swap a
+    folder for a link between that check and the open, and the gate (root with
+    every capability) would follow it into its own /data or into .storage."""
+    root = next(r for r in roots if _under(real, [r]))
+    parts = [p for p in real[len(root):].split("/") if p]
+    nofollow = os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        for part in parts[:-1]:
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        if not parts:
+            return os.dup(fd) if flags & os.O_DIRECTORY else None
+        return os.open(parts[-1], flags | nofollow, mode, dir_fd=fd)
+    finally:
+        os.close(fd)
+
+
 def agent_files(args):
     action = (args.get("action") or "").strip()
     read_roots = _agent_dirs("agent_files_read_dirs") + _agent_dirs("agent_files_write_dirs")
@@ -3588,16 +3694,23 @@ def agent_files(args):
         if not p or not os.path.isdir(p):
             return tool_text("DENIED or not a folder: list works only inside the read folders.", True)
         lines = []
-        for name in sorted(os.listdir(p)):
-            if _SECRET_NAME.search(name) or any(x in name.lower() for x in PROTECTED):
-                continue
-            fp = os.path.join(p, name)
-            try:
-                st = os.lstat(fp)
-            except OSError:
-                continue
-            kind = "dir " if os.path.isdir(fp) else "file"
-            lines.append(f"{kind} {st.st_size:>9} {datetime.fromtimestamp(st.st_mtime, timezone.utc).strftime('%Y-%m-%d %H:%M')} {name}")
+        try:
+            dfd = _open_beneath(p, read_roots, os.O_RDONLY | os.O_DIRECTORY)
+        except OSError:
+            return tool_text("DENIED: the folder changed or is a link.", True)
+        try:
+            names = sorted(os.listdir(dfd))
+            for name in names:
+                if _SECRET_NAME.search(name) or any(x in name.lower() for x in PROTECTED):
+                    continue
+                try:
+                    st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+                except OSError:
+                    continue
+                kind = "link" if stat.S_ISLNK(st.st_mode) else ("dir " if stat.S_ISDIR(st.st_mode) else "file")
+                lines.append(f"{kind} {st.st_size:>9} {datetime.fromtimestamp(st.st_mtime, timezone.utc).strftime('%Y-%m-%d %H:%M')} {name}")
+        finally:
+            os.close(dfd)
         return tool_text("\n".join(lines) or "(empty)")
     if action == "read":
         p = _agent_path(args.get("path"), read_roots)
@@ -3608,8 +3721,15 @@ def agent_files(args):
             n = max(1, min(200000, int(args.get("max_bytes") or 100000)))
         except Exception:
             off, n = 0, 100000
-        size = os.path.getsize(p)
-        with open(p, "rb") as f:
+        try:
+            rfd = _open_beneath(p, read_roots, os.O_RDONLY)
+        except OSError:
+            return tool_text("DENIED: the file changed or is a link.", True)
+        with os.fdopen(rfd, "rb") as f:
+            st = os.fstat(f.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                return tool_text("DENIED: not a regular file.", True)
+            size = st.st_size
             f.seek(off)
             data = f.read(n).decode("utf-8", "replace")
         text, k = redact_text(data)
@@ -3634,9 +3754,16 @@ def agent_files(args):
             return tool_text(f"DENIED: file would exceed {limit // 1024} KB.", True)
         if not os.path.isdir(os.path.dirname(p)):
             return tool_text("DENIED: the folder does not exist (folders are not created).", True)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_APPEND if mode == "a" else os.O_TRUNC)
-        fd = os.open(p, flags, 0o644)
+        flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if mode == "a" else 0)
+        try:
+            fd = _open_beneath(p, write_roots, flags, 0o644)
+        except OSError:
+            return tool_text("DENIED: the path changed or is a link.", True)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                return tool_text("DENIED: not a regular file.", True)
+            if mode != "a":
+                f.truncate(0)
             f.write(content)
         with STATE_LOCK:
             wid = STATE.get("window_id")
@@ -3696,12 +3823,22 @@ def run_gate_tool(name, args):
         timeout = 60
     cwd = args.get("cwd") or None
     if is_destructive(command):
+        # The phone shows the command as the user reads it: nothing may hide after
+        # the cut-off, and no invisible character may reorder what is on screen.
+        if len(command) > APPROVAL_MAX_CHARS:
+            return tool_text(f"DENIED: a command that needs approval must fit on the phone "
+                             f"({APPROVAL_MAX_CHARS} characters, this one has {len(command)}). "
+                             "Split it into shorter commands.", True)
+        if _HIDDEN_CHARS.search(command):
+            return tool_text("DENIED: the command holds an invisible or direction-control character, "
+                             "so the phone would show something other than what runs. Retype it "
+                             "without one.", True)
         pid = uuid.uuid4().hex[:6]
         with STATE_LOCK:
             STATE["pending"][pid] = {"command": command, "cwd": cwd, "timeout": timeout,
                                      "created": iso(now_utc()), "status": "pending"}
             save_state()
-        notify(T("approve_title"), f"[{pid}] {command[:400]}",
+        notify(T("approve_title"), f"[{pid}] {command}",
                actions=[{"action": f"AGENT_GATE_APPROVE_{pid}", "title": T("btn_approve")},
                         {"action": f"AGENT_GATE_REJECT_{pid}", "title": T("btn_reject")}],
                tag=f"agent_gate_approval_{pid}")

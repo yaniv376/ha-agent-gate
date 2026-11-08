@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.6.5
+
+- **A script can no longer send the gate a command (protection 2).** The gate
+  takes its commands on MQTT (`agent_gate/cmd/...`, `agent_gate/action`). With
+  HA write open, an agent could create a script that builds that topic at run
+  time (`'agent' ~ '_gate/cmd/open'`), which the text match never sees, and
+  use it to open the commands mechanism, approve its own held commands or
+  change the gate's settings. Write calls are now refused when they combine
+  MQTT with a Jinja template or a YAML tag, publish to the MQTT discovery
+  prefix (whose `~` abbreviation can spell the topic), or fire
+  `mobile_app_notification_action`. `\u` and `\x` escapes inside strings are
+  decoded before every protected match.
+- **No camera pictures while locked.** `ha_get_camera_image` matched the
+  `ha_get_*` read pattern, so it worked with the gate locked. New option
+  `read_tool_exclude` (default `ha_get_camera_image`) lists read tools that
+  still need HA write open.
+- **Report files can no longer be redirected by swapping a folder.**
+  `gate_agent_files` resolved the path once and then opened it by name. While
+  the commands mechanism was open, the shell could replace a folder with a
+  link in between, and the gate (root with every capability) would read or
+  write through it, for example into its own `state.json`. Files are now
+  opened one folder at a time with `O_NOFOLLOW`, and only regular files are
+  read or written.
+- **Approvals show the whole command.** A held command must be at most 400
+  characters (the phone used to show only the first 400) and may not contain
+  invisible or direction-control characters. The dashboard's approve button
+  acts only when exactly one command waits, and approve-all is gone; reject-all
+  still works.
+
 ## 0.6.4
 
 - **The shell can no longer read stored credentials (protection 9).** The

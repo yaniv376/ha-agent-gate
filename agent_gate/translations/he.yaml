@@ -35,6 +35,9 @@ configuration:
   read_tool_patterns:
     name: תבניות כלי קריאה
     description: כלי MCP שתואמים לתבניות האלה מותרים תמיד (הם רק קוראים).
+  read_tool_exclude:
+    name: כלי קריאה שעדיין צריכים חלון
+    description: כלים שתואמים לתבנית קריאה אבל נדחים כשכתיבה ב-HA סגורה. ברירת המחדל ha_get_camera_image, כך ששער נעול לא נותן תמונות מהמצלמות.
   protected_patterns:
     name: תבניות מוגנות
     description: קריאת כלי או פקודה שמזכירה אחת מאלה נדחית, גם בחלון פתוח. מרחיק את הסוכן מהשער עצמו.
