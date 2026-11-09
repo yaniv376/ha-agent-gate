@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.7
+
+- **Open several mechanisms in one go.** The dashboard can now select
+  mechanisms (`agent_gate/cmd/select` with a key or switch entity id toggles
+  one, `clear` empties the selection) and open all selected ones with a
+  single duration (`agent_gate/cmd/open` with `{"mech": "selected", ...}`).
+  The selection is shown as a `selected` attribute on every mechanism switch
+  and on `sensor.agent_gate_status`, is kept in memory only, and is cleared
+  once the selected mechanisms open. The ready-made dashboard has a new
+  "Open several" block. Selecting never opens anything by itself.
+
 ## 0.6.6
 
 - **A lock pressed while the gate is still opening now wins.** Before, a lock

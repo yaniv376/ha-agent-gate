@@ -233,6 +233,7 @@ def load_state():
         if base.get("mode") != "opening":
             base["mode"] = "open" if base["windows"] else "locked"
         base["busy"] = None   # transient, never valid after a restart
+        base["selected"] = []  # multi-select on the dashboard, transient too
         return base
     except Exception:
         return default_state()
@@ -1779,7 +1780,8 @@ def publish_all(actual=None, deviation=None):
                         "until_closed": bool(w) and not (w or {}).get("end"),
                         "opened_at": (w or {}).get("opened_at"),
                         "ends": _ends_text(w, m["key"] in deviation),
-                        "deviation": m["key"] in deviation}), qos=1, retain=True)
+                        "deviation": m["key"] in deviation,
+                        "selected": m["key"] in (st.get("selected") or [])}), qos=1, retain=True)
     status = "deviation" if deviation else ("open" if open_ else ("opening" if opening else "locked"))
     pub(f"{BASE}/status/state", status, qos=1, retain=True)
     pub(f"{BASE}/status/attributes", json.dumps({
@@ -1788,6 +1790,7 @@ def publish_all(actual=None, deviation=None):
         "window_end": (iso(latest) if latest and not unlimited else ("until closed" if open_ else None)),
         "soonest_end": iso(soonest) if soonest else None,
         "open_mechanisms": list(windows.keys()),
+        "selected": list(st.get("selected") or []),
         "open_names": [mech_name(k) for k in windows],
         "backup": st.get("backup"), "deviation": deviation, "phase": st.get("phase"),
         "canary_hits_24h": len(canary_hits_recent()), "tamper_events_24h": len(tamper_events_recent()),
@@ -1888,7 +1891,28 @@ def on_mqtt_message(client, userdata, msg):
         elif topic == f"{BASE}/cmd/open":
             spec, minutes = _parse_cmd(payload)
             minutes = int(minutes) if minutes not in (None, "") else default_min
-            _bg(open_mechs, _mech_keys(spec), minutes)
+            if spec == "selected":
+                with STATE_LOCK:
+                    keys = [k for k in (STATE.get("selected") or []) if k in MECH_BY_KEY]
+                    STATE["selected"] = []
+                publish_all()
+                if keys:
+                    _bg(open_mechs, keys, minutes)
+            else:
+                _bg(open_mechs, _mech_keys(spec), minutes)
+        elif topic == f"{BASE}/cmd/select":
+            # Dashboard multi-select: toggle one mechanism (key or switch entity id) in the
+            # selection; "clear" empties it. Opening happens only via cmd/open "selected".
+            spec, _ = _parse_cmd(payload)
+            with STATE_LOCK:
+                sel = [k for k in (STATE.get("selected") or []) if k in MECH_BY_KEY]
+                if spec == "clear":
+                    sel = []
+                else:
+                    for k in _mech_keys(spec) if spec not in ("all", "*", "", "open") else []:
+                        sel = [x for x in sel if x != k] if k in sel else sel + [k]
+                STATE["selected"] = sel
+            publish_all()
         elif topic == f"{BASE}/cmd/close":
             spec, _ = _parse_cmd(payload)
             keys = list(MECH_BY_KEY) if spec in ("all", "*", "") else _mech_keys(spec)
@@ -2225,7 +2249,7 @@ DASH_STRINGS = {
         "entities": "Gate entities", "log": "Gate log", "backups": "Backups", "backups_sub": "Restore a previous version",
         "rebuild": "Rebuild dashboard", "rebuild_sub": "Reset it to the add-on's current layout",
         "rebuild_confirm": "Replace this dashboard with the add-on's layout? Your edits to it are lost.",
-        "open_all": "Open all", "m15": "15 min", "h1": "1 hour", "h3": "3 hours", "unlimited": "Until I close",
+        "multi": "Open several", "multi_hint": "Tap mechanisms to select them, then tap a duration once.", "multi_clear": "Clear selection", "multi_none": "Nothing selected", "multi_n": "{n} selected", "open_all": "Open all", "m15": "15 min", "h1": "1 hour", "h3": "3 hours", "unlimited": "Until I close",
         "plus_hour": "+1 hour to everything open", "plus_hour_short": "+1 hour", "close": "Close now",
         "opening_short": "opening...", "until_s": "until you close it", "until_t": "until {t}", "choose": "Closed. Choose how long to open:",
         "is_open": "**Open** {until}. Tapping a duration sets a new end from now.", "is_dev": "**Running without a window.** Open a window to keep it, or close it.",
@@ -2289,7 +2313,7 @@ DASH_STRINGS = {
         "entities": "ישויות השער", "log": "לוג השער", "backups": "גיבויים", "backups_sub": "שחזור גרסה קודמת",
         "rebuild": "בנה מחדש את הדשבורד", "rebuild_sub": "החזרה לפריסה הנוכחית של התוסף",
         "rebuild_confirm": "להחליף את הדשבורד בפריסה של התוסף? העריכות שלך בו יאבדו.",
-        "open_all": "פתח הכול", "m15": "15 דק׳", "h1": "שעה", "h3": "3 שעות", "unlimited": "עד שאסגור",
+        "multi": "פתיחה של כמה יחד", "multi_hint": "לחץ על המנגנונים כדי לסמן אותם, ואז לחץ פעם אחת על משך הזמן.", "multi_clear": "נקה בחירה", "multi_none": "לא נבחר מנגנון", "multi_n": "נבחרו {n}", "open_all": "פתח הכול", "m15": "15 דק׳", "h1": "שעה", "h3": "3 שעות", "unlimited": "עד שאסגור",
         "plus_hour": "+ שעה לכל מה שפתוח", "plus_hour_short": "+ שעה", "close": "סגור עכשיו",
         "opening_short": "נפתח…", "until_s": "עד שתסגור", "until_t": "עד {t}", "choose": "סגור. בחר לכמה זמן לפתוח:",
         "is_open": "**פתוח** {until}. לחיצה על משך קובעת זמן חדש מעכשיו.", "is_dev": "**רץ עכשיו בלי חלון.** פתח חלון כדי להשאיר אותו, או סגור.",
@@ -2463,6 +2487,28 @@ def dashboard_config():
         _btn(D("rebuild"), "mdi:view-dashboard-edit-outline", _mqtt_tap("action", "AGENT_GATE_REBUILD_DASHBOARD"),
              "grey", confirm=D("rebuild_confirm"), columns=12),
     ]
+    # --- open several together -------------------------------------------------
+    multi_cards = [{"type": "heading", "heading": D("multi"), "icon": "mdi:checkbox-multiple-marked-outline"},
+                   {"type": "markdown", "text_only": True, "content": D("multi_hint") + "\n\n{% set n = (state_attr('sensor.agent_gate_status','selected') or []) | count %}**{{ '" + D("multi_none") + "' if n == 0 else '" + D("multi_n", n="' ~ n ~ '") + "' }}**"}]
+    for m in MECHANISMS:
+        sw = f"switch.agent_gate_mech_{m['key']}"
+        multi_cards.append({"type": "tile", "entity": sw, "name": m["name"], "hide_state": True,
+                            "icon": "mdi:checkbox-blank-outline", "color": "grey",
+                            "visibility": [{"condition": "template", "value_template": "{{ not state_attr('" + sw + "','selected') }}"}],
+                            "tap_action": _mqtt_tap("cmd/select", m["key"]), "icon_tap_action": _mqtt_tap("cmd/select", m["key"]),
+                            "grid_options": {"columns": 6, "rows": 1}})
+        multi_cards.append({"type": "tile", "entity": sw, "name": m["name"], "hide_state": True,
+                            "icon": "mdi:checkbox-marked", "color": "amber",
+                            "visibility": [{"condition": "template", "value_template": "{{ state_attr('" + sw + "','selected') == true }}"}],
+                            "tap_action": _mqtt_tap("cmd/select", m["key"]), "icon_tap_action": _mqtt_tap("cmd/select", m["key"]),
+                            "grid_options": {"columns": 6, "rows": 1}})
+    multi_cards += [
+        _btn(D("m15"), "mdi:timer-outline", _mqtt_tap("cmd/open", '{"mech":"selected","minutes":15}'), "amber"),
+        _btn(D("h1"), "mdi:timer-outline", _mqtt_tap("cmd/open", '{"mech":"selected","minutes":60}'), "amber"),
+        _btn(D("h3"), "mdi:timer-sand", _mqtt_tap("cmd/open", '{"mech":"selected","minutes":180}'), "amber"),
+        _btn(D("unlimited"), "mdi:timer-off-outline", _mqtt_tap("cmd/open", '{"mech":"selected","minutes":0}'), "blue"),
+        _btn(D("multi_clear"), "mdi:checkbox-blank-off-outline", _mqtt_tap("cmd/select", "clear"), "grey", columns=12),
+    ]
     # --- open all (bottom) -----------------------------------------------------
     open_cards = [
         {"type": "heading", "heading": D("open_all"), "icon": "mdi:lock-open-variant"},
@@ -2563,7 +2609,7 @@ def dashboard_config():
     subviews.append({"title": D("prev_scans"), "path": "scans", "subview": True, "back_path": home,
                      "type": "sections", "max_columns": 1, "sections": [{"type": "grid", "cards": hist}]})
     main = {"title": D("title"), "path": "gate", "icon": "mdi:shield-lock", "type": "sections", "max_columns": 1,
-            "sections": [{"type": "grid", "cards": top + [pending, setup_tile] + mech_cards + scan_cards + settings_cards + open_cards}]}
+            "sections": [{"type": "grid", "cards": top + [pending, setup_tile] + mech_cards + multi_cards + scan_cards + settings_cards + open_cards}]}
     return {"views": [main] + subviews}
 
 
