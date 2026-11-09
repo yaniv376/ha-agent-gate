@@ -1601,6 +1601,11 @@ DURATION_BUTTONS = [("open_5", "Open 5 min", 5), ("open_15", "Open 15 min", 15),
                     ("open_180", "Open 3 hours", 180), ("open_unlimited", "Open until I close", 0),
                     ("extend_60", "Add 1 hour", -60), ("lock_now", "Lock now", -1),
                     ("backup_now", "Backup now", -2), ("scan_now", "Scan now", -3)]
+SELECT_BUTTONS = [("open_selected_15", "Open selected 15 min", '{"mech":"selected","minutes":15}', "cmd/open"),
+                  ("open_selected_60", "Open selected 1 hour", '{"mech":"selected","minutes":60}', "cmd/open"),
+                  ("open_selected_180", "Open selected 3 hours", '{"mech":"selected","minutes":180}', "cmd/open"),
+                  ("open_selected_unlimited", "Open selected until I close", '{"mech":"selected","minutes":0}', "cmd/open"),
+                  ("select_clear", "Clear selection", "clear", "cmd/select")]
 
 
 def mqtt_connect():
@@ -1664,9 +1669,17 @@ def publish_discovery():
                                             "state_topic": f"{BASE}/mech/{m['key']}/state",
                                             "command_topic": f"{BASE}/cmd/mech/{m['key']}",
                                             "json_attributes_topic": f"{BASE}/mech/{m['key']}/attributes"})
+        # Multi-select (0.6.8): plain HA entities, so a dashboard can select and open
+        # several mechanisms with switch.toggle / button.press and no mqtt.publish.
+        _disc("switch", f"select_{m['key']}", {"name": f"Select {m['name']}", "icon": "mdi:checkbox-marked-outline",
+                                              "state_topic": f"{BASE}/mech/{m['key']}/selected",
+                                              "command_topic": f"{BASE}/cmd/select_set/{m['key']}"})
         _disc("sensor", f"mech_{m['key']}_end", {"name": f"{m['name']} ends", "device_class": "timestamp",
                                                  "state_topic": f"{BASE}/mech/{m['key']}/end",
                                                  "entity_category": "diagnostic"})
+    for obj, name, payload, topic in SELECT_BUTTONS:
+        _disc("button", obj, {"name": name, "icon": "mdi:checkbox-multiple-marked-outline" if topic == "cmd/open" else "mdi:checkbox-blank-off-outline",
+                              "command_topic": f"{BASE}/{topic}", "payload_press": payload})
     for obj, name, _ in DURATION_BUTTONS:
         icon = {"backup_now": "mdi:backup-restore", "scan_now": "mdi:shield-search", "lock_now": "mdi:lock"}.get(obj, "mdi:timer-outline")
         _disc("button", obj, {"name": name, "icon": icon,
@@ -1773,6 +1786,7 @@ def publish_all(actual=None, deviation=None):
         a = actual.get(m["key"], {})
         w = windows.get(m["key"])
         pub(f"{BASE}/mech/{m['key']}/state", "ON" if w else "OFF", qos=1, retain=True)
+        pub(f"{BASE}/mech/{m['key']}/selected", "ON" if m["key"] in (st.get("selected") or []) else "OFF", qos=1, retain=True)
         pub(f"{BASE}/mech/{m['key']}/end", (w or {}).get("end") or "None", qos=1, retain=True)
         pub(f"{BASE}/mech/{m['key']}/attributes",
             json.dumps({"running_now": a.get("running"), "addons": a.get("addons", {}),
@@ -1900,6 +1914,14 @@ def on_mqtt_message(client, userdata, msg):
                     _bg(open_mechs, keys, minutes)
             else:
                 _bg(open_mechs, _mech_keys(spec), minutes)
+        elif topic.startswith(f"{BASE}/cmd/select_set/"):
+            key = topic.rsplit("/", 1)[1]
+            if key in MECH_BY_KEY:
+                on = payload.upper() == "ON"
+                with STATE_LOCK:
+                    sel = [k for k in (STATE.get("selected") or []) if k in MECH_BY_KEY and k != key]
+                    STATE["selected"] = sel + [key] if on else sel
+                publish_all()
         elif topic == f"{BASE}/cmd/select":
             # Dashboard multi-select: toggle one mechanism (key or switch entity id) in the
             # selection; "clear" empties it. Opening happens only via cmd/open "selected".

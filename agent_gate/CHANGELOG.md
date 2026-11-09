@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.8
+
+- **Multi-select as plain entities.** Every mechanism now also has a
+  `switch.agent_gate_select_<key>` (on = selected) and there are buttons
+  `button.agent_gate_open_selected_15 / _60 / _180 / _unlimited` and
+  `button.agent_gate_select_clear`. A custom dashboard can build the
+  "open several" block with `switch.toggle` and `button.press` only, without
+  any `mqtt.publish` card action, so it passes the gate's MQTT write filter.
+  Like every gate entity, an agent cannot press or toggle them.
+
 ## 0.6.7
 
 - **Open several mechanisms in one go.** The dashboard can now select
