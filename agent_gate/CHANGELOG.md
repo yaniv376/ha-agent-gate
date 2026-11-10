@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.9
+
+- **MCP tool annotations.** The three gate tools now declare `annotations`
+  (`title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`,
+  `openWorldHint`): `gate_status` is read-only, `gate_run_command` and
+  `gate_agent_files` are marked destructive, so MCP clients can warn or ask
+  before calling them. Behaviour of the gate is unchanged.
+- **Unit tests.** New `agent_gate/tests/` with tests for the policy checks
+  (protected names, gate-control bypasses, read tools, destructive commands,
+  secret redaction) and for the tool list. Run with
+  `python -m unittest discover -s agent_gate/tests`.
+- The internal version string and the Docker label now match the add-on
+  version.
+
 ## 0.6.8
 
 - **Multi-select as plain entities.** Every mechanism now also has a

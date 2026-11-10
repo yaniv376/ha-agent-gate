@@ -60,7 +60,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.6.6"
+VERSION = "0.6.9"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -3425,6 +3425,8 @@ GATE_TOOLS = [
     {"name": "gate_status",
      "description": "Agent Gate: is the gate locked or open, until when, which mechanisms are on, "
                     "pending command approvals. Always allowed.",
+     "annotations": {"title": "Agent Gate status", "readOnlyHint": True,
+                     "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "gate_run_command",
      "description": "Run a shell command on the Home Assistant host side (inside the Agent Gate "
@@ -3432,6 +3434,9 @@ GATE_TOOLS = [
                     "Refused while the gate is locked. Destructive commands (delete, move, docker, "
                     "restart ...) are held for the user's approval on their phone: the call returns an "
                     "approval_id; call again with only approval_id once the user approved.",
+     # A shell can change or delete anything under the mounts and reach the network.
+     "annotations": {"title": "Run a shell command (gated)", "readOnlyHint": False,
+                     "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
      "inputSchema": {"type": "object",
                      "properties": {"command": {"type": "string", "description": "sh -c command"},
                                     "cwd": {"type": "string", "description": "working directory, default /addons"},
@@ -3444,6 +3449,9 @@ GATE_TOOLS = [
                     "read folders; write (mode w or a) works only inside the configured write folders, "
                     "for .html .md .txt .json .jsonl .csv files. No delete, move or rename. "
                     "Call with action 'roots' to see the allowed folders.",
+     # write with mode 'w' replaces a file, so the tool as a whole is destructive.
+     "annotations": {"title": "Agent files (list, read, write)", "readOnlyHint": False,
+                     "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
      "inputSchema": {"type": "object",
                      "properties": {"action": {"type": "string", "enum": ["roots", "list", "read", "write"]},
                                     "path": {"type": "string", "description": "absolute path of a folder (list) or file"},
