@@ -3,6 +3,7 @@
 [![Add repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fyaniv376%2Fha-agent-gate)
 [![GitHub release](https://img.shields.io/github/v/release/yaniv376/ha-agent-gate)](https://github.com/yaniv376/ha-agent-gate/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![M8ven Score](https://m8ven.ai/badge/mcp/yaniv376-ha-agent-gate-1bmci5?v=162fee93e744317cbff3143dbefe5726)](https://m8ven.ai/mcp/yaniv376-ha-agent-gate-1bmci5?s=readme)
 
 **One switch between an AI agent and everything it can use to change your
 Home Assistant.** Locked by default; you open a timed window from the
