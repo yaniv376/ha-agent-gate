@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.0
+
+- **Approval requests in plain words.** The phone notification for a held
+  command now opens with what the command does in everyday words (the gate's
+  own reading: *Delete files*, *Move or rename files* ...), then the agent's
+  explanation, and only then the exact command. The dashboard's waiting list
+  and the command history show the same explanation.
+- `gate_run_command` takes a new `explanation` argument: one or two short
+  sentences in the user's language, no jargon (300 characters at most, no
+  invisible characters).
+- New option `require_explanation` (default on): a command that needs
+  approval is refused without an explanation, and the agent is told to call
+  again with one. Turn it off to keep the old behaviour for agents that
+  cannot send it.
+
 ## 0.6.9
 
 - **MCP tool annotations.** The three gate tools now declare `annotations`

@@ -14,6 +14,9 @@ configuration:
   approval_timeout_minutes:
     name: פג תוקף אישור (דקות)
     description: פקודה שממתינה לאישור שלך פגה אחרי זמן זה.
+  require_explanation:
+    name: לחייב הסבר פשוט
+    description: פקודה שצריכה את האישור שלך נדחית אם הסוכן לא צירף הסבר קצר במילים פשוטות. ההסבר מוצג בטלפון מעל הפקודה.
   backup_policy:
     name: גיבוי לפני פתיחה
     description: "always: גיבוי מלא לפני כל פתיחה. every_6h / daily: רק אם הגיבוי המלא האחרון (מכל מקור) ישן יותר. never: בלי גיבוי. ניתן לשינוי גם מהדשבורד."

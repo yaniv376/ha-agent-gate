@@ -60,7 +60,7 @@ except Exception:  # pragma: no cover - the image always has it
 # --------------------------------------------------------------------------
 # 1. config + state
 # --------------------------------------------------------------------------
-VERSION = "0.6.9"
+VERSION = "0.7.0"
 OPTIONS_PATH = os.environ.get("GATE_OPTIONS", "/data/options.json")
 DATA_DIR = os.environ.get("GATE_DATA", "/data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -116,6 +116,7 @@ def load_options():
         "deviation_grace_minutes": 5,
         "approval_timeout_minutes": 3,
         "approval_wait_seconds": 45,
+        "require_explanation": True,
         "backup_policy": "always",
         "backup_skip_short": False,
         "backup_parallel": False,
@@ -341,6 +342,10 @@ STRINGS = {
         "btn_lock": "Lock now", "btn_plus_hour": "+1 hour", "btn_open_hour": "Open 1 hour",
         "btn_stop_now": "Stop it now",
         "approve_title": "Agent Gate: approve command?", "btn_approve": "Approve", "btn_reject": "Reject",
+        "approve_gate_sees": "What it does: {what}",
+        "approve_agent_says": "The agent explains: {text}",
+        "approve_no_explanation": "The agent gave no explanation.",
+        "approve_command": "The command:",
         "approve_hint": "Approve or reject with the buttons on the phone notification or on the Agent Gate dashboard.",
         "approve_many": "{n} commands are waiting. The dashboard approves only when one waits: approve each one from its own phone notification.",
         "canary_title": "Agent Gate: TRAP TRIPPED, locked",
@@ -366,6 +371,10 @@ STRINGS = {
         "btn_lock": "נעל עכשיו", "btn_plus_hour": "+ שעה", "btn_open_hour": "פתח לשעה",
         "btn_stop_now": "עצור עכשיו",
         "approve_title": "שער הסוכן: לאשר פקודה?", "btn_approve": "אשר", "btn_reject": "דחה",
+        "approve_gate_sees": "מה הפקודה עושה: {what}",
+        "approve_agent_says": "הסבר הסוכן: {text}",
+        "approve_no_explanation": "הסוכן לא צירף הסבר.",
+        "approve_command": "הפקודה:",
         "approve_hint": "אישור או דחייה בכפתורים שבהתראת הטלפון או בדשבורד של השער.",
         "approve_many": "ממתינות {n} פקודות. הדשבורד מאשר רק כשממתינה פקודה אחת: אשר כל פקודה מההתראה שלה בטלפון.",
         "canary_title": "שער הסוכן: המלכודת הופעלה, ננעל",
@@ -672,6 +681,7 @@ for p in OPT.get("destructive_patterns", []) or []:
         log(f"bad destructive pattern {p!r}: {e}")
 
 APPROVAL_MAX_CHARS = 400
+EXPLANATION_MAX_CHARS = 300
 # Control characters other than tab and newline, zero-width characters, bidi
 # embeddings/overrides/isolates, the BOM and Unicode tag characters.
 _HIDDEN_CHARS = re.compile("[\x00-\x08\x0b-\x1f\x7f\u200b-\u200f\u202a-\u202e"
@@ -1514,7 +1524,8 @@ def timer_loop():
                     if p.get("status") == "pending" and now - parse_iso(p["created"]) > tmo:
                         p["status"] = "expired"
                         _append_jsonl(HISTORY_PATH, {"event": "approval", "id": pid, "ts": iso(now),
-                                                     "verdict": "expired", "command": p.get("command", "")})
+                                                     "verdict": "expired", "command": p.get("command", ""),
+                                                     "explanation": p.get("explanation", "")})
                 if STATE["pending"]:
                     save_state()
             if time.time() - last_actual_pub >= 30:
@@ -1831,7 +1842,9 @@ def publish_all(actual=None, deviation=None):
     pend = {k: v for k, v in st.get("pending", {}).items() if v.get("status") == "pending"}
     pub(f"{BASE}/pending/state", str(len(pend)), qos=1, retain=True)
     pub(f"{BASE}/pending/attributes", json.dumps({
-        "items": [{"id": k, "command": v["command"][:120], "created": v["created"]} for k, v in pend.items()]
+        "items": [{"id": k, "command": v["command"][:120], "created": v["created"],
+                   "summary": plain_command(v["command"]), "explanation": v.get("explanation", "")}
+                  for k, v in pend.items()]
     }, ensure_ascii=False), qos=1, retain=True)
     try:
         n_dec, mds = build_history()
@@ -2071,7 +2084,8 @@ def handle_action(payload):
                 if p and p.get("status") == "pending":
                     p["status"] = verdict
                     _append_jsonl(HISTORY_PATH, {"event": "approval", "id": k, "ts": iso(now_utc()),
-                                                 "verdict": verdict, "command": p.get("command", "")})
+                                                 "verdict": verdict, "command": p.get("command", ""),
+                                                 "explanation": p.get("explanation", "")})
             save_state()
         log(f"approval {ids}: {verdict}")
         publish_all()
@@ -2162,6 +2176,29 @@ def plain_command(command, d=None):
     return d("pc_other")
 
 
+def clean_explanation(text):
+    """The agent's plain-language explanation as one line; raises ValueError when it cannot be shown."""
+    text = " ".join(str(text or "").split())
+    if _HIDDEN_CHARS.search(text):
+        raise ValueError("the explanation holds an invisible or direction-control character. Retype it without one.")
+    if len(text) > EXPLANATION_MAX_CHARS:
+        raise ValueError(f"the explanation must fit on the phone ({EXPLANATION_MAX_CHARS} characters, "
+                         f"this one has {len(text)}). Shorten it.")
+    return text
+
+
+def approval_message(pid, command, explanation=""):
+    """What the phone shows for a held command: plain words first, the exact command last.
+    The first line is the gate's own reading of the command, so it cannot be talked around;
+    the second is what the agent says it is doing."""
+    return "\n".join([
+        T("approve_gate_sees", what=plain_command(command, _dl(LANG))),
+        T("approve_agent_says", text=explanation) if explanation else T("approve_no_explanation"),
+        "",
+        T("approve_command"),
+        f"[{pid}] {command}"])
+
+
 def _hist_when(ts):
     dt = parse_iso(ts)
     return dt.astimezone().strftime("%d/%m %H:%M") if dt else "?"
@@ -2207,6 +2244,7 @@ def build_history(lang=None, max_cmds=20, max_gate=15):
             tail = " · " + (d("h_ran_ok") if rc == 0 else (d("h_not_run") if rc is None else d("h_ran_fail")))
         cmds.append(f"**{d('h_pref_c')}{i + 1}** {icon} {_hist_when(e.get('ts'))} · {d('h_' + v)}: "
                     f"{plain_command(e.get('command', ''), d)}{tail}\n"
+                    + (f"{e['explanation']}\n" if e.get("explanation") else "") +
                     f"`{(e.get('command') or '')[:110].replace('`', chr(39))}`\n")
     gate = ["## " + d("h_wins"), d("h_legend_g")]
     if not wins:
@@ -2421,7 +2459,7 @@ def dashboard_config():
                "conditions": [{"condition": "numeric_state", "entity": "sensor.agent_gate_pending", "above": 0}],
                "card": {"type": "vertical-stack", "cards": [
                    {"type": "markdown", "content": "**" + D("pending_title") + "**\n"
-                    "{% for i in state_attr('sensor.agent_gate_pending','items') or [] %}- `{{ i.id }}` {{ i.command }}\n{% endfor %}"},
+                    "{% for i in state_attr('sensor.agent_gate_pending','items') or [] %}- **{{ i.summary }}**{% if i.explanation %}: {{ i.explanation }}{% endif %}\n  `{{ i.id }}` {{ i.command }}\n{% endfor %}"},
                    {"type": "horizontal-stack", "cards": [
                        _btn(D("approve_latest"), "mdi:check-circle-outline", _mqtt_tap("action", "AGENT_GATE_APPROVE_LATEST"), "green", entity="sensor.agent_gate_pending"),
                        _btn(D("reject_all"), "mdi:close-circle-outline", _mqtt_tap("action", "AGENT_GATE_REJECT_ALL"), "red", entity="sensor.agent_gate_pending")]}]}}
@@ -3433,13 +3471,21 @@ GATE_TOOLS = [
                     "container, with /addons, /homeassistant and /share mounted read-write). "
                     "Refused while the gate is locked. Destructive commands (delete, move, docker, "
                     "restart ...) are held for the user's approval on their phone: the call returns an "
-                    "approval_id; call again with only approval_id once the user approved.",
+                    "approval_id; call again with only approval_id once the user approved. "
+                    "Always pass explanation: the user is not technical and decides by reading it.",
      # A shell can change or delete anything under the mounts and reach the network.
      "annotations": {"title": "Run a shell command (gated)", "readOnlyHint": False,
                      "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
      "inputSchema": {"type": "object",
                      "properties": {"command": {"type": "string", "description": "sh -c command"},
                                     "cwd": {"type": "string", "description": "working directory, default /addons"},
+                                    "explanation": {"type": "string", "maxLength": EXPLANATION_MAX_CHARS,
+                                                    "description": "One or two short sentences in the user's own "
+                                                                   "language and in everyday words, no commands, "
+                                                                   "paths or jargon: what this does, why, and what "
+                                                                   "changes for them. Shown on the approval "
+                                                                   "notification above the command. Needed for "
+                                                                   "every command that can be held."},
                                     "timeout_seconds": {"type": "integer", "default": 60, "maximum": 600},
                                     "approval_id": {"type": "string",
                                                     "description": "re-run a held command after approval"}}}},
@@ -3977,12 +4023,22 @@ def run_gate_tool(name, args):
             return tool_text("DENIED: the command holds an invisible or direction-control character, "
                              "so the phone would show something other than what runs. Retype it "
                              "without one.", True)
+        try:
+            explanation = clean_explanation(args.get("explanation"))
+        except ValueError as e:
+            return tool_text(f"DENIED: {e}", True)
+        if not explanation and OPT.get("require_explanation", True):
+            return tool_text("DENIED: this command needs the user's approval, and the user decides by reading "
+                             "a plain explanation. Call again with the same command plus explanation: one or "
+                             "two short sentences in the user's language and in everyday words (what it does, "
+                             "why, what changes for them).", True)
         pid = uuid.uuid4().hex[:6]
         with STATE_LOCK:
             STATE["pending"][pid] = {"command": command, "cwd": cwd, "timeout": timeout,
+                                     "explanation": explanation,
                                      "created": iso(now_utc()), "status": "pending"}
             save_state()
-        notify(T("approve_title"), f"[{pid}] {command}",
+        notify(T("approve_title"), approval_message(pid, command, explanation),
                actions=[{"action": f"AGENT_GATE_APPROVE_{pid}", "title": T("btn_approve")},
                         {"action": f"AGENT_GATE_REJECT_{pid}", "title": T("btn_reject")}],
                tag=f"agent_gate_approval_{pid}")

@@ -14,6 +14,9 @@ configuration:
   approval_timeout_minutes:
     name: Approval timeout (minutes)
     description: A command waiting for your approval expires after this.
+  require_explanation:
+    name: Require a plain explanation
+    description: A command that needs your approval is refused unless the agent adds a short explanation in everyday words. It is shown above the command on the phone.
   backup_policy:
     name: Backup before opening
     description: "always: full backup before every open. every_6h / daily: only when the newest full backup (any source) is older than that. never: no backup. Also on the dashboard."
