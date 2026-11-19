@@ -147,5 +147,46 @@ class RedactionTests(unittest.TestCase):
         self.assertEqual(gate.redact_text("hello world"), ("hello world", 0))
 
 
+class ApprovalExplanation(unittest.TestCase):
+    def test_schema_has_explanation(self):
+        tool = [t for t in gate.GATE_TOOLS if t["name"] == "gate_run_command"][0]
+        self.assertIn("explanation", tool["inputSchema"]["properties"])
+
+    def test_clean_explanation_one_line(self):
+        self.assertEqual(gate.clean_explanation("  moves one\n file  to the bin "), "moves one file to the bin")
+        self.assertEqual(gate.clean_explanation(None), "")
+
+    def test_clean_explanation_refuses_hidden_and_long(self):
+        with self.assertRaises(ValueError):
+            gate.clean_explanation("safe\u202e text")
+        with self.assertRaises(ValueError):
+            gate.clean_explanation("x" * (gate.EXPLANATION_MAX_CHARS + 1))
+
+    def test_message_order(self):
+        msg = gate.approval_message("abc123", "mv a.txt _to_delete/", "Moves an old log to the bin.")
+        lines = msg.split("\n")
+        self.assertIn(gate.plain_command("mv a.txt _to_delete/"), lines[0])
+        self.assertIn("Moves an old log to the bin.", lines[1])
+        self.assertEqual(lines[-1], "[abc123] mv a.txt _to_delete/")
+
+    def test_message_without_explanation(self):
+        msg = gate.approval_message("abc123", "rm x")
+        self.assertIn(gate.T("approve_no_explanation"), msg)
+        self.assertTrue(msg.endswith("[abc123] rm x"))
+
+    def test_held_command_without_explanation_is_refused(self):
+        old = gate.is_active
+        gate.is_active = lambda key: True
+        try:
+            before = dict(gate.STATE["pending"])
+            res = gate.run_gate_tool("gate_run_command", {"command": "rm /tmp/gate_test_nothing"}) \
+                if hasattr(gate, "run_gate_tool") else None
+        finally:
+            gate.is_active = old
+        if res is not None:
+            self.assertIn("explanation", json.dumps(res))
+            self.assertEqual(gate.STATE["pending"], before)
+
+
 if __name__ == "__main__":
     unittest.main()

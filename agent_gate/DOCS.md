@@ -143,6 +143,12 @@ buttons. Then:
 `destructive_patterns` (rm, mv, docker, reboot ...) are held: the agent gets
 an `approval_id` and you get "Approve command?" on the phone and on the
 dashboard. Unanswered approvals expire after `approval_timeout_minutes`.
+The notification leads with plain words: first the gate's own reading of
+the command (*Delete files*, *Move or rename files* ...), then the agent's
+explanation in your language, and only then the exact command. The gate's
+line comes from the command itself, so trust it over the agent's line if the
+two disagree. With `require_explanation` on (the default) a held command
+without an explanation is refused and the agent is told to add one.
 A held command must fit on the phone (400 characters) and may not contain
 invisible or direction-control characters, so what you read is what runs.
 The dashboard's *Approve* button works only while exactly one command waits;
@@ -369,6 +375,8 @@ Windows and backups
   the "held" reply; approving inside that time runs the command at once (0 = off).
   `backup_parallel` (false): open the windows at once and run the backup alongside
   instead of waiting for it. If that backup fails the window stays open and you are notified.
+  `require_explanation` (true): a command that needs approval must come with a short
+  explanation in everyday words (300 characters at most), shown above the command.
 - `deviation_grace_minutes` (5): how long an add-on may run without a window.
 - `approval_timeout_minutes` (3): how long a held command waits for you.
 
